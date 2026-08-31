@@ -28,7 +28,9 @@
   "scripts": {
     "build": "npm run build --workspaces --if-present",
     "check": "npm run check --workspaces --if-present",
-    "test": "npm run test --workspaces --if-present",
+    "test": "npm run test:installer && npm run test --workspaces --if-present",
+    "test:installer": "node --test scripts/*.test.mjs",
+    "setup": "./scripts/setup-self-hosted.sh",
     "setup:bitkub-account": "./scripts/add-bitkub-account.sh",
     "dev:web": "npm run dev --workspace @moondi/web",
     "dev:api": "npm run dev --workspace @moondi/api",

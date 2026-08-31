@@ -32,10 +32,15 @@ than a multi-tenant service.
 4. Explain unambiguously that valuation is not P&L and that the app cannot
    trade or withdraw.
 5. Verify documentation commands and run all repository checks before release.
+6. Provide a repeatable local first-install wizard that creates only the
+   installer's Cloudflare resources, writes ignored configuration, and passes
+   exchange credentials only to interactive Wrangler secret prompts. It must
+   leave Access policy decisions to an explicit manual checklist.
 
 **Acceptance:** a new owner can create an independent Cloudflare installation
-from the tracked examples without receiving the original owner's resource IDs
-or secrets, and public docs do not overstate exchange-history/P&L capability.
+from the guided local installer or tracked examples without receiving the
+original owner's resource IDs or secrets, and public docs do not overstate
+exchange-history/P&L capability.
 
 ---
 

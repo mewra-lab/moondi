@@ -68,6 +68,20 @@ git clone https://github.com/mewra-lab/moondi.git
 cd moondi
 npm install
 
+npm run setup
+```
+
+The guided installer creates an independent D1 database, KV namespace, ignored
+Worker configuration, first account row, and deployments in the installer's own
+Cloudflare account. Bitkub credentials are entered only into Wrangler's hidden
+secret prompt. It intentionally leaves Cloudflare Access as a final manual
+security checklist.
+
+For a manual or existing installation, create local-only configuration from the
+tracked examples instead:
+
+```bash
+
 cp apps/api/wrangler.example.jsonc apps/api/wrangler.jsonc
 cp apps/sync-worker/wrangler.example.jsonc apps/sync-worker/wrangler.jsonc
 cp apps/api/.dev.vars.example apps/api/.dev.vars
@@ -79,9 +93,9 @@ npm test
 npm run build
 ```
 
-This only prepares a local copy. Follow [Quick start](docs/quickstart.md) for
-the safe, complete setup: Cloudflare resources, database migrations, secrets,
-account record, deployment, Access, and verification.
+Follow [Quick start](docs/quickstart.md) for the safe, complete setup and the
+manual alternative: resources, database migrations, secrets, account record,
+deployment, Access, and verification.
 
 To add another Bitkub account to an existing deployment, use the repeatable
 interactive setup path. It creates only a non-secret D1 account row and passes

@@ -20,10 +20,14 @@ exchange credential.
 
 The public repository contains configuration examples only. Actual Wrangler
 configurations, Cloudflare resource IDs, domains, and secrets are local to each
-installation and ignored by Git. A repeatable CLI wizard can create a
-non-secret additional Bitkub account row through the installer's authenticated
-Wrangler session and set the credential map through a hidden Wrangler prompt.
-It must never send their secrets to a Moondi-operated server.
+installation and ignored by Git. The repeatable local `npm run setup` installer
+creates D1/KV resources only after confirmation, writes ignored Worker
+configuration, applies migrations, deploys the application, and invokes
+Wrangler's hidden prompts for a first read-only Bitkub key pair. A separate
+wizard can create a non-secret additional Bitkub account row through the
+installer's authenticated Wrangler session and set the credential map through a
+hidden Wrangler prompt. Neither path may send secrets to a Moondi-operated
+server.
 
 Cloudflare's deploy-button flow is not the primary distribution mechanism for
 the current architecture because it does not deploy a Pages application and a

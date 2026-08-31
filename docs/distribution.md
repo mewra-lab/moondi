@@ -24,19 +24,22 @@ necessary isolation, support, compliance, billing, and incident-response model.
 This is more work than a SaaS sign-up, but it means the user—not Moondi—owns
 the sensitive infrastructure and can revoke/delete it independently.
 
-## Future: setup wizard
+## Guided installer
 
-After the documentation path is stable, build a local CLI setup wizard. It can
-use the installer's authenticated Wrangler session to:
+`npm run setup` is a local CLI installer for a new, independent Moondi
+installation. It uses the installer's authenticated Wrangler session to:
 
 - create D1/KV resources;
 - generate ignored Wrangler configuration files;
 - apply migrations;
-- guide them through secret prompts; and
+- invoke Wrangler's protected prompts for the first read-only Bitkub key and
+  secret; and
 - print the exact manual Cloudflare Access/Bitkub checks left to complete.
 
-The wizard must never transmit a Bitkub secret to a third-party server or store
-it in a generated file that Git could commit.
+It refuses to overwrite an existing installation configuration. It must never
+transmit a Bitkub secret to a third-party server or store it in a generated file
+that Git could commit. Existing installations use the documented manual path
+and `npm run setup:bitkub-account` for additional accounts.
 
 ## Why no single deploy button yet
 

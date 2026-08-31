@@ -21,12 +21,39 @@ Do not begin with a key that can trade or withdraw.
 ## 1. Create your copy
 
 Use **Use this template** on GitHub when available, or fork/clone the project.
-Then install dependencies and create local-only configuration files:
+Then install dependencies:
 
 ```bash
 git clone https://github.com/<your-account>/moondi.git
 cd moondi
 npm install
+```
+
+### Guided installation (recommended)
+
+Run the local installer:
+
+```bash
+npm run setup
+```
+
+It checks the installer's authenticated Wrangler account, creates a D1 database
+and KV namespace after confirmation, writes ignored local Worker configuration,
+applies migrations, deploys both Workers and Pages, and creates the first
+non-secret Bitkub account row. It asks for the Bitkub key and secret only via
+Wrangler's protected prompt; it does not save them in a file, browser, Git
+history, or GitHub Actions.
+
+The installer cannot responsibly automate the final Cloudflare Access policy or
+choose a Bitkub key's permissions. Complete its explicit Access checklist and
+use a key with read permission only.
+
+### Manual installation
+
+For an existing deployment or a custom resource layout, create local-only
+configuration files yourself:
+
+```bash
 
 cp apps/api/wrangler.example.jsonc apps/api/wrangler.jsonc
 cp apps/sync-worker/wrangler.example.jsonc apps/sync-worker/wrangler.jsonc
