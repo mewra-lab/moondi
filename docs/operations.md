@@ -67,7 +67,8 @@ exchange payloads.
 3. Pull the release into your own repository.
 4. Run `npm run check`, `npm test`, and `npm run build`.
 5. Apply migrations once, before Workers depending on them.
-6. Deploy API, sync Worker, then Pages (the provided web deploy script targets
+6. Deploy sync Worker, API, then Pages (the API configuration binds to the sync
+   Worker, and the provided web deploy script targets
    the `production` Pages branch).
 7. Verify `/health`, Access, current balance freshness, and one scheduled run.
 

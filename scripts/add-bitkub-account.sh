@@ -191,7 +191,7 @@ ENV_FILE=/dev/null
 
 if [[ "${1:-}" == "--help" ]]; then
   printf '%s\n' 'Usage: npm run setup:bitkub-account'
-  printf '%s\n' 'Creates a non-secret Bitkub account row in remote D1, then updates the Sync Worker credential map.'
+  printf '%s\n' 'Validates and stores the Sync Worker credential map, then creates a non-secret Bitkub account row in remote D1.'
   exit 0
 fi
 
@@ -222,8 +222,10 @@ validate_credential_map() {
     const accountId = process.argv[1];
     const queryResponse = JSON.parse(process.argv[2]);
     const groups = Array.isArray(queryResponse) ? queryResponse : [queryResponse];
-    const expected = groups.flatMap((group) => Array.isArray(group.results) ? group.results : [])
+    const existing = groups.flatMap((group) => Array.isArray(group.results) ? group.results : [])
       .map((row) => row.id).filter((id) => typeof id === "string");
+    if (existing.includes(accountId)) throw new Error("That local account ID already exists.");
+    const expected = [...existing, accountId];
     const value = JSON.parse(fs.readFileSync(0, "utf8"));
     const isCredential = (entry) => entry && typeof entry === "object" && !Array.isArray(entry)
       && typeof entry.apiKey === "string" && entry.apiKey.length > 0
@@ -262,29 +264,29 @@ ask CONFIG_OVERRIDE "Wrangler config path [Enter for apps/sync-worker/wrangler.j
 CONFIG_PATH="${CONFIG_OVERRIDE:-apps/sync-worker/wrangler.jsonc}"
 validate_account_inputs
 note "The browser and D1 will never receive the Bitkub API key or secret."
-pause "Account details are ready. Press Enter to create the D1 row."
+pause "Account details are ready. Press Enter to validate the existing account list and credential map."
 
-stage "Create the account row"
-say "This writes one non-secret account record to your remote D1 database."
-warn "Until the next stage completes, the new account safely remains unsynced; legacy single-account keys are intentionally refused once two accounts exist."
-confirm "Create Bitkub account '$ACCOUNT_ID' in remote D1" || die 'Cancelled before changing D1.'
-ACCOUNT_SQL="INSERT INTO accounts (id, exchange, label, owner_email, created_at) VALUES ($(sql_literal "$ACCOUNT_ID"), 'bitkub', $(sql_literal "$ACCOUNT_LABEL"), $(sql_literal "$OWNER_EMAIL"), CAST(strftime('%s', 'now') AS INTEGER) * 1000);"
-run_wrangler d1 execute "$DATABASE_NAME" --remote --config "$CONFIG_PATH" --command "$ACCOUNT_SQL"
-say "Account row created. Reading the complete Bitkub account-ID list for secret-map validation."
-ACCOUNT_ROWS_JSON=$(run_wrangler d1 execute "$DATABASE_NAME" --remote --config "$CONFIG_PATH" --command "SELECT id FROM accounts WHERE exchange = 'bitkub' AND archived_at IS NULL ORDER BY id;" --json)
+stage "Validate the credential map"
+say "The existing account list is read before any D1 change, so cancelling or entering invalid JSON cannot interrupt the current account's sync."
+ACCOUNT_ROWS_JSON=$(run_wrangler d1 execute "$DATABASE_NAME" --remote --config "$CONFIG_PATH" --command "SELECT id FROM accounts WHERE exchange = 'bitkub' ORDER BY id;" --json)
 ACCOUNT_IDS=$(list_bitkub_account_ids "$ACCOUNT_ROWS_JSON") || die 'Could not read the Bitkub account IDs returned by D1.'
-say "The credential map must contain exactly these Bitkub account IDs: $ACCOUNT_IDS"
+say "Existing Bitkub accounts (connected and disconnected): $ACCOUNT_IDS"
+say "The replacement credential map must contain those IDs plus the new '$ACCOUNT_ID' ID."
 pause "Review the IDs above, then press Enter to continue."
-
-stage "Set the credential map"
 say "Paste one compact JSON object containing every Bitkub account ID and its separate read-only credential pair."
 say "It is hidden while you paste, never written to .env/D1, and sent only to Cloudflare's Wrangler secret command."
-warn "This replaces BITKUB_ACCOUNTS_JSON. Omitting an existing account would stop its sync, so validation rejects incomplete or extra map entries."
+warn "This replaces BITKUB_ACCOUNTS_JSON. Omitting a stored account would prevent it from syncing after reconnect, so validation rejects incomplete or extra map entries."
 ask_secret BITKUB_ACCOUNTS_JSON "Paste the complete credential map:"
 [[ -n "$BITKUB_ACCOUNTS_JSON" ]] || die 'Credential map cannot be empty.'
-validate_credential_map || die 'Credential map validation failed; D1 was not changed further and no secret was set.'
-confirm "Set BITKUB_ACCOUNTS_JSON on the Sync Worker" || die 'Cancelled before setting the Cloudflare secret.'
+validate_credential_map || die 'Credential map validation failed; D1 was not changed and no secret was set.'
+
+stage "Connect the account"
+say "The credential map is stored first. Only after Wrangler confirms it will the non-secret active account row be created."
+warn "If the final D1 insert fails, existing accounts keep syncing; re-run this wizard with the same account ID to finish."
+confirm "Set BITKUB_ACCOUNTS_JSON and connect '$ACCOUNT_ID'" || die 'Cancelled before changing Cloudflare or D1.'
 printf '%s' "$BITKUB_ACCOUNTS_JSON" | run_wrangler secret put BITKUB_ACCOUNTS_JSON --config "$CONFIG_PATH"
 unset BITKUB_ACCOUNTS_JSON
-say "The secret map was set. The next scheduled or manual read-only sync will populate this account."
+ACCOUNT_SQL="INSERT INTO accounts (id, exchange, label, owner_email, created_at) VALUES ($(sql_literal "$ACCOUNT_ID"), 'bitkub', $(sql_literal "$ACCOUNT_LABEL"), $(sql_literal "$OWNER_EMAIL"), CAST(strftime('%s', 'now') AS INTEGER) * 1000);"
+run_wrangler d1 execute "$DATABASE_NAME" --remote --config "$CONFIG_PATH" --command "$ACCOUNT_SQL"
+say "The secret map and account row are ready. The next scheduled or manual read-only sync will populate this account."
 finish

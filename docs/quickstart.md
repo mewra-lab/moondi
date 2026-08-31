@@ -144,13 +144,15 @@ npm run setup:bitkub-account
 ```
 
 It asks for a new non-secret local account ID, label, owner email, D1 database
-name, and ignored Sync Worker config path. After an explicit confirmation, it
-adds the D1 `accounts` row. It then asks for the **complete**
-`BITKUB_ACCOUNTS_JSON` map in hidden terminal input and validates that it has
-one credential pair for every active Bitkub account currently in D1 before passing it
-to `wrangler secret put`. The map is never written to `.env`, D1, or the
-repository. If the command stops before the secret stage, the account is safe
-but unsynced; rerun the helper with the full map before the next sync.
+name, and ignored Sync Worker config path. It then asks for the **complete**
+`BITKUB_ACCOUNTS_JSON` map in hidden terminal input and validates one credential
+pair for every stored Bitkub account—including disconnected accounts—plus the
+new ID. After explicit confirmation, Wrangler stores that secret first and the
+wizard creates the active D1 `accounts` row only after the secret succeeds. The
+map is never written to `.env`, D1, or the repository. Cancelling or entering
+invalid JSON leaves D1 and the current secret unchanged. If the final D1 insert
+fails, existing accounts continue syncing and rerunning the helper can finish
+the new account.
 
 ## 7. Deploy in dependency order
 

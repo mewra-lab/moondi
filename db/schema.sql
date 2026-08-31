@@ -25,7 +25,7 @@ CREATE INDEX IF NOT EXISTS balance_snapshots_account_time_idx
 CREATE TABLE IF NOT EXISTS trades (
   id TEXT PRIMARY KEY,
   account_id TEXT NOT NULL REFERENCES accounts(id),
-  external_id TEXT NOT NULL,
+  external_id TEXT,
   side TEXT NOT NULL CHECK (side IN ('buy', 'sell')),
   base_asset TEXT NOT NULL,
   quote_asset TEXT NOT NULL,
@@ -46,7 +46,7 @@ CREATE INDEX IF NOT EXISTS trades_account_executed_idx
 CREATE TABLE IF NOT EXISTS crypto_transfers (
   id TEXT PRIMARY KEY,
   account_id TEXT NOT NULL REFERENCES accounts(id),
-  external_id TEXT NOT NULL,
+  external_id TEXT,
   direction TEXT NOT NULL CHECK (direction IN ('deposit', 'withdraw')),
   asset TEXT NOT NULL,
   amount REAL NOT NULL,
@@ -65,7 +65,7 @@ CREATE INDEX IF NOT EXISTS crypto_transfers_account_executed_idx
 CREATE TABLE IF NOT EXISTS fiat_transfers (
   id TEXT PRIMARY KEY,
   account_id TEXT NOT NULL REFERENCES accounts(id),
-  external_id TEXT NOT NULL,
+  external_id TEXT,
   direction TEXT NOT NULL CHECK (direction IN ('deposit', 'withdraw')),
   currency TEXT NOT NULL,
   amount REAL NOT NULL,
@@ -118,6 +118,30 @@ CREATE TABLE IF NOT EXISTS sync_events (
 
 CREATE INDEX IF NOT EXISTS sync_events_account_type_time_idx
   ON sync_events(account_id, data_type, occurred_at DESC);
+
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+  endpoint TEXT PRIMARY KEY,
+  p256dh TEXT NOT NULL,
+  auth TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  notify_trades INTEGER NOT NULL DEFAULT 1,
+  notify_crypto_transfers INTEGER NOT NULL DEFAULT 1,
+  notify_fiat_transfers INTEGER NOT NULL DEFAULT 1,
+  notify_sync_issues INTEGER NOT NULL DEFAULT 1,
+  notify_price_alerts INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS push_subscriptions_updated_at_idx
+  ON push_subscriptions(updated_at);
+
+CREATE TABLE IF NOT EXISTS sync_push_state (
+  account_id TEXT NOT NULL REFERENCES accounts(id),
+  data_type TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('deferred', 'failure')),
+  detail TEXT,
+  PRIMARY KEY (account_id, data_type)
+);
 
 CREATE TABLE IF NOT EXISTS sync_locks (
   name TEXT PRIMARY KEY,

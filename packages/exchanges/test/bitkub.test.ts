@@ -1,17 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { BitkubAdapter, createBitkubSigner, mapBitkubBalances, mapBitkubFiatTransfers, mapBitkubLegacyBalances, mapBitkubOrder, mapBitkubTransfer } from '../src/bitkub/index'
+import { BitkubAdapter, createBitkubSigner, mapBitkubBalances, mapBitkubFiatTransfers, mapBitkubOrder, mapBitkubTransfer } from '../src/bitkub/index'
 
 describe('Bitkub mapping', () => {
   it('maps wallet balances', () => {
     expect(mapBitkubBalances([{ available: '1.25', currency: 'BTC', reserved: '0.25' }])).toEqual([
       { asset: 'BTC', available: 1.25, reserved: 0.25 },
-    ])
-  })
-
-  it('maps a legacy balance response', () => {
-    expect(mapBitkubLegacyBalances({ BTC: { available: '0.5', reserved: '0.1' }, THB: { available: 100, reserved: 0 } })).toEqual([
-      { asset: 'BTC', available: 0.5, reserved: 0.1 },
-      { asset: 'THB', available: 100, reserved: 0 },
     ])
   })
 
@@ -22,6 +15,15 @@ describe('Bitkub mapping', () => {
       price: 100000,
       quoteAsset: 'THB',
       side: 'buy',
+    })
+  })
+
+  it('derives the base amount from the current order-history fields', () => {
+    expect(mapBitkubOrder({ amount: '1000', credit: '5', fee: '25', rate: '100000', side: 'buy', ts: 1_700_000_000_000, txn_id: 'trade-current' }, 'BTC_THB', { source: 'fixture' })).toMatchObject({
+      amount: 0.0098,
+      baseAsset: 'BTC',
+      fee: 25,
+      price: 100000,
     })
   })
 
@@ -75,27 +77,38 @@ describe('Bitkub mapping', () => {
     await expect(adapter.fetchBalances()).rejects.toThrow('Bitkub request failed: 401 (A1000-CW: Unauthorized Access)')
   })
 
-  it('falls back to the legacy wallet endpoint when V4 rejects authentication', async () => {
+  it('rejects an empty wallet response instead of recording a false empty snapshot', async () => {
     const responses = [
       Response.json(1_700_000_000_000),
-      Response.json({ code: 'A1000-MK', message: 'Unauthorized' }, { status: 401 }),
-      Response.json(1_700_000_000_001),
-      Response.json({ error: 0, result: { BTC: { available: '0.5', reserved: '0.1' }, THB: { available: '100', reserved: '0' } } }),
+      Response.json({ code: '0', data: [] }),
     ]
-    const requests: Array<{ body: string | undefined; method: string | undefined; url: string }> = []
-    const fetcher: typeof fetch = async (input, init) => {
-      requests.push({ body: typeof init?.body === 'string' ? init.body : undefined, method: init?.method, url: String(input) })
+    const fetcher: typeof fetch = async () => {
       const response = responses.shift()
       if (!response) throw new Error('unexpected request')
       return response
     }
     const adapter = new BitkubAdapter({ apiKey: 'key', apiSecret: 'secret', fetcher })
 
-    await expect(adapter.fetchBalances()).resolves.toEqual([
-      { asset: 'BTC', available: 0.5, reserved: 0.1 },
-      { asset: 'THB', available: 100, reserved: 0 },
-    ])
-    expect(requests.at(-1)).toMatchObject({ body: '{}', method: 'POST', url: 'https://api.bitkub.com/api/v3/market/balances' })
+    await expect(adapter.fetchBalances()).rejects.toThrow('Bitkub wallet returned no balance rows')
+  })
+
+  it('does not call the removed legacy wallet endpoint when V4 rejects authentication', async () => {
+    const responses = [
+      Response.json(1_700_000_000_000),
+      Response.json({ code: 'A1000-MK', message: 'Unauthorized' }, { status: 401 }),
+    ]
+    const requests: string[] = []
+    const fetcher: typeof fetch = async (input, init) => {
+      void init
+      requests.push(String(input))
+      const response = responses.shift()
+      if (!response) throw new Error('unexpected request')
+      return response
+    }
+    const adapter = new BitkubAdapter({ apiKey: 'key', apiSecret: 'secret', fetcher })
+
+    await expect(adapter.fetchBalances()).rejects.toThrow('Bitkub request failed: 401')
+    expect(requests.some((request) => request.includes('/api/v3/market/balances'))).toBe(false)
   })
 
   it('maps a direct public ticker response', async () => {
@@ -109,11 +122,11 @@ describe('Bitkub mapping', () => {
     ])
   })
 
-  it('uses documented page order-history pagination', async () => {
+  it('uses documented keyset order-history pagination', async () => {
     const responses = [
       Response.json({ error: 0, result: [{ source: 'exchange', symbol: 'BTC_THB' }, { source: 'broker', symbol: 'BROKER_THB' }] }),
       Response.json(1_700_000_000_000),
-      Response.json({ error: 0, pagination: { next: null }, result: [] }),
+      Response.json({ error: 0, pagination: { cursor: 'unused', has_next: false }, result: [] }),
     ]
     const requests: string[] = []
     const fetcher: typeof fetch = async (input) => {
@@ -129,9 +142,32 @@ describe('Bitkub mapping', () => {
     if (!historyUrl) throw new Error('order-history request was not sent')
     const query = new URL(historyUrl).searchParams
     expect(query.get('lmt')).toBe('100')
-    expect(query.get('p')).toBe('1')
-    expect(query.get('pagination_type')).toBeNull()
+    expect(query.get('cursor')).toBe('e30=')
+    expect(query.get('pagination_type')).toBe('keyset')
     expect(query.get('sym')).toBe('BTC_THB')
+  })
+
+  it('follows the next keyset cursor exactly once', async () => {
+    const responses = [
+      Response.json({ error: 0, result: [{ source: 'exchange', symbol: 'BTC_THB' }] }),
+      Response.json(1_700_000_000_000),
+      Response.json({ error: 0, pagination: { cursor: 'cursor-2', has_next: true }, result: [{ amount: '1000', credit: '0', fee: '25', rate: '100000', side: 'buy', ts: 1_700_000_000_000, txn_id: 'trade-1' }] }),
+      Response.json(1_700_000_000_001),
+      Response.json({ error: 0, pagination: { cursor: 'cursor-2', has_next: false }, result: [] }),
+    ]
+    const requests: string[] = []
+    const fetcher: typeof fetch = async (input) => {
+      requests.push(String(input))
+      const response = responses.shift()
+      if (!response) throw new Error('unexpected request')
+      return response
+    }
+    const adapter = new BitkubAdapter({ apiKey: 'key', apiSecret: 'secret', fetcher })
+
+    await expect(adapter.fetchTrades()).resolves.toHaveLength(1)
+    const historyRequests = requests.filter((request) => request.includes('/api/v3/market/my-order-history'))
+    expect(new URL(historyRequests[0] ?? '').searchParams.get('cursor')).toBe('e30=')
+    expect(new URL(historyRequests[1] ?? '').searchParams.get('cursor')).toBe('cursor-2')
   })
 
   it('continues when Bitkub returns application error 81 for a symbol', async () => {

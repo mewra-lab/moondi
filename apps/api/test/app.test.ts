@@ -13,6 +13,19 @@ describe('API worker', () => {
     expect(response.headers.get('access-control-allow-origin')).toBe('http://localhost:5173')
   })
 
+  it('rejects cross-origin state changes even when they use simple form requests', async () => {
+    const prepare = vi.fn()
+    const response = await app.request(
+      '/api/watchlist',
+      { body: new URLSearchParams({ asset: 'BTC' }), headers: { Origin: 'https://attacker.example' }, method: 'POST' },
+      { ALLOWED_ORIGIN: 'https://portfolio.example', CACHE: {} as KVNamespace, DB: { prepare } as unknown as D1Database },
+    )
+
+    expect(response.status).toBe(403)
+    await expect(response.json()).resolves.toEqual({ error: 'Origin not allowed' })
+    expect(prepare).not.toHaveBeenCalled()
+  })
+
   it('returns to the web app after API Access authentication', async () => {
     const response = await app.request('/api/access/complete')
     expect(response.status).toBe(302)
@@ -84,6 +97,22 @@ describe('API worker', () => {
       0,
       0,
     )
+  })
+
+  it('rejects malformed or oversized push subscription fields before writing to D1', async () => {
+    const prepare = vi.fn()
+    const response = await app.request(
+      '/api/push/subscriptions',
+      {
+        body: new URLSearchParams({ subscription: JSON.stringify({ endpoint: 'https://[invalid', keys: { auth: 'auth', p256dh: 'key' } }) }),
+        method: 'POST',
+      },
+      { CACHE: {} as KVNamespace, DB: { prepare } as unknown as D1Database },
+    )
+
+    expect(response.status).toBe(400)
+    await expect(response.json()).resolves.toEqual({ error: 'Invalid push subscription' })
+    expect(prepare).not.toHaveBeenCalled()
   })
 
   it('delegates a real push test to the internal sync Worker and rate-limits the device', async () => {
@@ -290,7 +319,7 @@ describe('API worker', () => {
     expect(bind.mock.calls[0]?.[2]).toBeLessThan(Date.now() - 1_800 * 24 * 60 * 60 * 1_000)
   })
 
-  it('omits incomplete portfolio history intervals instead of valuing unpriced crypto at zero', async () => {
+  it('omits incomplete portfolio history intervals instead of reporting a partial-account drop', async () => {
     const all = vi.fn().mockResolvedValue({ results: [{ snapshot_at: 1_780_000_000_000, total_value: 50000 }] })
     const bind = vi.fn().mockReturnValue({ all })
     const prepare = vi.fn().mockReturnValue({ bind })
@@ -302,7 +331,54 @@ describe('API worker', () => {
 
     expect(response.status).toBe(200)
     await expect(response.json()).resolves.toEqual({ points: [{ snapshot_at: 1_780_000_000_000, total_value: 50000 }] })
-    expect(prepare).toHaveBeenCalledWith(expect.stringContaining('HAVING SUM(unpriced_assets) = 0'))
+    const query = prepare.mock.calls[0]?.[0] as string
+    expect(query).toContain('WHERE unpriced_assets = 0')
+    expect(query).toContain('COUNT(DISTINCT account_id) AS account_count')
+    expect(query).toContain('SELECT COUNT(*) FROM scoped_accounts')
+  })
+
+  it('builds current holdings from one complete latest account snapshot', async () => {
+    const all = vi.fn().mockResolvedValue({ results: [] })
+    const prepare = vi.fn().mockReturnValue({ all })
+    const response = await app.request(
+      '/api/portfolio',
+      undefined,
+      { CACHE: {} as KVNamespace, DB: { prepare } as unknown as D1Database },
+    )
+
+    expect(response.status).toBe(200)
+    const query = prepare.mock.calls[0]?.[0] as string
+    expect(query).toContain('SELECT account_id, MAX(snapshot_at) AS snapshot_at')
+    expect(query).toContain('GROUP BY account_id')
+    expect(query).toContain('latest.snapshot_at AS updated_at')
+    expect(query).not.toContain('GROUP BY account_id, asset')
+  })
+
+  it('uses the cursor id as the deterministic transaction tie breaker', async () => {
+    const all = vi.fn().mockResolvedValue({ results: [] })
+    const bind = vi.fn().mockReturnValue({ all })
+    const prepare = vi.fn().mockReturnValue({ bind })
+    const response = await app.request(
+      '/api/transactions?limit=50',
+      undefined,
+      { CACHE: {} as KVNamespace, DB: { prepare } as unknown as D1Database },
+    )
+
+    expect(response.status).toBe(200)
+    expect(prepare).toHaveBeenCalledWith(expect.stringContaining('ORDER BY records.executed_at DESC, records.id DESC'))
+  })
+
+  it('rejects a malformed transaction cursor instead of silently restarting pagination', async () => {
+    const prepare = vi.fn()
+    const response = await app.request(
+      '/api/transactions?cursor=not-base64',
+      undefined,
+      { CACHE: {} as KVNamespace, DB: { prepare } as unknown as D1Database },
+    )
+
+    expect(response.status).toBe(400)
+    await expect(response.json()).resolves.toEqual({ error: 'Invalid transaction cursor' })
+    expect(prepare).not.toHaveBeenCalled()
   })
 
   it('returns multiple price histories in one request for holding sparklines', async () => {

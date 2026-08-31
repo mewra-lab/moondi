@@ -165,7 +165,10 @@ is configured.
 Use the repeatable `npm run setup:bitkub-account` wizard for this operation.
 It may write only the non-secret `accounts` row and update the Worker secret
 through the installer's interactive Wrangler session; it must never persist the
-credential map in a repository file or send it through a browser.
+credential map in a repository file or send it through a browser. Validate the
+complete replacement map for every stored account before either mutation, store the secret before making
+the new account active, and leave existing account sync working if setup is
+cancelled or the final row insert fails.
 
 An account-disconnect control may archive a local account row only. It must
 exclude the account from scheduled sync and normal user-facing aggregate data,

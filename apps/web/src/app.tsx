@@ -2,7 +2,7 @@ import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, ty
 import { useRegisterSW } from 'virtual:pwa-register/react'
 import { getCurrentSubscription, isPushSupported, subscribe, unsubscribe } from '@mmmike/web-push/client'
 import { addPriceAlert, addWatchlistAsset, apiAccessRequired, apiAccessUrl, archiveAccount, loadAccounts, loadArchivedAccounts, loadAssetPriceHistories, loadAssetPriceHistory, loadBackup, loadDashboard, loadPushPublicKey, loadSyncEvents, loadTransactions, loadValueHistory, removeAllocationTarget, removePriceAlert, removePushSubscription, removeWatchlistAsset, restoreAccount, saveAllocationTarget, savePushSubscription, testPushDelivery, triggerManualSync } from './api'
-import type { Account, AllocationTarget, Holding, Portfolio, PriceAlert, PriceHistoryPoint, PushNotificationPreferences, SyncEvent, SyncStatus, Transaction, ValueHistoryPoint, WatchlistAsset } from './api'
+import type { Account, AllocationTarget, Dashboard, Holding, Portfolio, PriceAlert, PriceHistoryPoint, PushNotificationPreferences, SyncEvent, SyncStatus, Transaction, ValueHistoryPoint, WatchlistAsset } from './api'
 
 type View = 'overview' | 'history' | 'sync' | 'transactions'
 type Theme = 'light' | 'dark'
@@ -288,7 +288,10 @@ const AllocationTargets = ({ holdings, language, onRemove, onSave, targets }: {
   const [message, setMessage] = useState<string | null>(null)
   const [workingAsset, setWorkingAsset] = useState<string | null>(null)
   const totalValue = holdings.reduce((total, holding) => total + valueOf(holding.available, holding.reserved, holding.price), 0)
-  const assets = [...new Set(holdings.filter((holding) => holdingAmount(holding) > 0).map((holding) => holding.asset))].toSorted()
+  const assets = [...new Set([
+    ...holdings.filter((holding) => holdingAmount(holding) > 0).map((holding) => holding.asset),
+    ...targets.map((target) => target.asset),
+  ])].toSorted()
   const targetByAsset = new Map(targets.map((target) => [target.asset, target.target_percent]))
   const totalTarget = targets.reduce((total, target) => total + target.target_percent, 0)
 
@@ -464,10 +467,12 @@ const TrackedPrices = ({ holdings, language, onAddAlert, onAddAsset, onRemoveAle
   const [targetPrice, setTargetPrice] = useState('')
   const [message, setMessage] = useState<string | null>(null)
   const [isWorking, setIsWorking] = useState(false)
-  const availableAssets = [...new Set(holdings.filter((holding) => holding.asset !== 'THB').map((holding) => holding.asset))].toSorted()
+  const availableAssets = [...new Set(holdings
+    .filter((holding) => holding.asset !== 'THB' && holdingAmount(holding) > 0)
+    .map((holding) => holding.asset))].toSorted()
 
   useEffect(() => {
-    if (!asset && availableAssets[0]) setAsset(availableAssets[0])
+    if (!availableAssets.includes(asset)) setAsset(availableAssets[0] ?? '')
   }, [asset, availableAssets])
 
   const addWatch = async () => {
@@ -1249,13 +1254,16 @@ const HistoryView = ({ accountId, initialPoints, language, onBack, valuesVisible
   const percentage = change !== null && first && first.total_value !== 0 ? (change / first.total_value) * 100 : null
 
   const applyCustomRange = () => {
-    const from = Date.parse(customStart)
-    const to = Date.parse(customEnd)
-    if (!Number.isFinite(from) || !Number.isFinite(to) || from > to) {
+    const fromDate = new Date(`${customStart}T00:00:00`)
+    const toExclusiveDate = new Date(`${customEnd}T00:00:00`)
+    toExclusiveDate.setDate(toExclusiveDate.getDate() + 1)
+    const from = fromDate.getTime()
+    const to = toExclusiveDate.getTime() - 1
+    if (!customStart || !customEnd || !Number.isFinite(from) || !Number.isFinite(to) || from > to) {
       setError(language === 'th' ? 'เลือกวันเริ่มต้นและวันสิ้นสุดให้ถูกต้อง' : 'Choose a valid start and end date.')
       return
     }
-    setCustomBounds({ from, to: to + 24 * 60 * 60 * 1_000 - 1 })
+    setCustomBounds({ from, to })
     setRange('custom')
   }
 
@@ -1619,7 +1627,7 @@ const SettingsDialog = ({ accounts, archivedAccounts, language, onArchiveAccount
             </div>
             {archivedAccounts.length > 0 ? <div className="archived-account-settings">
               <p>{language === 'th' ? 'บัญชีที่ตัดการเชื่อมต่อ' : 'Disconnected accounts'}</p>
-              <span>{language === 'th' ? 'เชื่อมต่อกลับเพื่อเปิด sync และแสดงข้อมูลเดิมอีกครั้ง หากคุณ revoke key ใน Bitkub แล้ว ต้องตั้งค่า key ใหม่ผ่านเครื่องมือบนเครื่อง' : 'Reconnect to resume sync and show retained data. If you revoked the Bitkub key, set up a new key with the local setup tool.'}</span>
+              <span>{language === 'th' ? 'เชื่อมต่อกลับเพื่อเปิด sync และแสดงข้อมูลเดิมอีกครั้ง หาก revoke key ใน Bitkub แล้ว ต้องเปลี่ยน credential ของบัญชีนี้ใน Worker secret ก่อน' : 'Reconnect to resume sync and show retained data. If you revoked the Bitkub key, replace this account entry in the Worker credential secret first.'}</span>
               <div className="account-settings-list">
                 {archivedAccounts.map((account) => (
                   <div className="account-settings-row" key={account.id}>
@@ -1921,10 +1929,20 @@ export const App = () => {
   const [pullDistance, setPullDistance] = useState(0)
   const pullStartY = useRef<number | null>(null)
   const pullDistanceRef = useRef(0)
+  const dashboardRequestId = useRef(0)
   const needsApiAccess = error === apiAccessRequired
 
-  const reloadDashboard = useCallback(async () => {
-    const dashboard = await loadDashboard(selectedAccountId)
+  const loadDashboardScope = useCallback(async (accountId?: string) => {
+    const requestId = dashboardRequestId.current + 1
+    dashboardRequestId.current = requestId
+    let dashboard: Dashboard
+    try {
+      dashboard = await loadDashboard(accountId)
+    } catch (reason) {
+      if (dashboardRequestId.current !== requestId) return false
+      throw reason
+    }
+    if (dashboardRequestId.current !== requestId) return false
     setHistory(dashboard.history)
     setPortfolio(dashboard.portfolio)
     setSyncStatus(dashboard.syncStatus)
@@ -1933,7 +1951,13 @@ export const App = () => {
     setWatchlist(dashboard.watchlist)
     setPriceAlerts(dashboard.priceAlerts)
     setAllocationTargets(dashboard.targets)
-  }, [selectedAccountId])
+    setError(null)
+    return true
+  }, [])
+
+  const reloadDashboard = useCallback(async () => {
+    return await loadDashboardScope(selectedAccountId)
+  }, [loadDashboardScope, selectedAccountId])
 
   useEffect(() => {
     if (accessDenied || signedOut) {
@@ -2058,14 +2082,14 @@ export const App = () => {
     setSelectedAccountId(undefined)
     setAccounts((current) => current.filter((item) => item.id !== account.id))
     setArchivedAccounts((current) => [account, ...current.filter((item) => item.id !== account.id)])
-    void reloadDashboard().catch(() => undefined)
+    await loadDashboardScope(undefined)
   }
 
   const reconnectAccount = async (account: Account) => {
     await restoreAccount(account.id)
     setArchivedAccounts((current) => current.filter((item) => item.id !== account.id))
     setAccounts((current) => [...current, account].sort((left, right) => left.label.localeCompare(right.label)))
-    await reloadDashboard()
+    await loadDashboardScope(selectedAccountId)
   }
 
   const refreshFromPull = async () => {

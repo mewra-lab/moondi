@@ -1,1 +1,1 @@
-export { BitkubAdapter, createBitkubSigner, mapBitkubBalances, mapBitkubFiatTransfers, mapBitkubLegacyBalances, mapBitkubOrder, mapBitkubTransfer } from './bitkub/index'
+export { BitkubAdapter, createBitkubSigner, mapBitkubBalances, mapBitkubFiatTransfers, mapBitkubOrder, mapBitkubTransfer } from './bitkub/index'

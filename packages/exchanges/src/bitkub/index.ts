@@ -34,21 +34,22 @@ type BitkubBalance = {
   reserved: string | number
 }
 
-type BitkubLegacyBalance = {
-  available: string | number
-  reserved: string | number
-}
-
-type BitkubLegacyBalances = Record<string, BitkubLegacyBalance>
-
 type BitkubOrder = {
   txn_id: string
   side: 'buy' | 'sell'
   rate: string | number
   fee: string | number
+  credit?: string | number
   amount: string | number
   receive?: string | number
   ts: string | number
+}
+
+type BitkubOrderHistoryEnvelope = BitkubEnvelope<BitkubOrder[]> & {
+  pagination?: {
+    cursor?: string
+    has_next?: boolean
+  }
 }
 
 type BitkubCryptoTransfer = {
@@ -165,13 +166,6 @@ export const mapBitkubBalances = (balances: BitkubBalance[]): NormalizedBalance[
     reserved: asNumber(balance.reserved),
   }))
 
-export const mapBitkubLegacyBalances = (balances: BitkubLegacyBalances): NormalizedBalance[] =>
-  Object.entries(balances).map(([asset, balance]) => ({
-    asset,
-    available: asNumber(balance.available),
-    reserved: asNumber(balance.reserved),
-  }))
-
 export const mapBitkubOrder = (order: BitkubOrder, quoteAsset: string, raw: unknown): NormalizedTrade => {
   const [baseAsset] = quoteAsset.split('_')
 
@@ -179,16 +173,28 @@ export const mapBitkubOrder = (order: BitkubOrder, quoteAsset: string, raw: unkn
     throw new Error(`Invalid Bitkub symbol: ${quoteAsset}`)
   }
 
-  const baseAmount = order.side === 'buy' ? asNumber(order.receive) : asNumber(order.amount)
+  const price = asNumber(order.rate)
+  const fee = asNumber(order.fee)
+  const creditedFee = asNumber(order.credit ?? 0)
+  const quoteAmount = asNumber(order.amount)
+  const baseAmount = order.side === 'buy'
+    ? order.receive === undefined
+      ? (quoteAmount - Math.max(fee - creditedFee, 0)) / price
+      : asNumber(order.receive)
+    : quoteAmount
+
+  if (!Number.isFinite(baseAmount) || baseAmount < 0 || price <= 0) {
+    throw new Error(`Invalid Bitkub order quantities for ${order.txn_id}`)
+  }
 
   return {
     id: order.txn_id,
     side: order.side,
     baseAsset,
     quoteAsset: quoteAsset.split('_')[1] ?? 'THB',
-    price: asNumber(order.rate),
+    price,
     amount: baseAmount,
-    fee: asNumber(order.fee),
+    fee,
     feeAsset: 'THB',
     executedAt: toMilliseconds(order.ts),
     raw,
@@ -242,14 +248,9 @@ export class BitkubAdapter implements ExchangeAdapter {
   }
 
   async fetchBalances(): Promise<NormalizedBalance[]> {
-    try {
-      const payload = await this.secureGet<BitkubBalance[]>('/api/v4/wallet/balances')
-      return mapBitkubBalances(payload)
-    } catch (error) {
-      if (!(error instanceof BitkubRequestError) || error.status !== 401) throw error
-      const balances = await this.securePost<BitkubLegacyBalances>('/api/v3/market/balances', {})
-      return mapBitkubLegacyBalances(balances)
-    }
+    const payload = await this.secureGet<BitkubBalance[]>('/api/v4/wallet/balances')
+    if (payload.length === 0) throw new Error('Bitkub wallet returned no balance rows')
+    return mapBitkubBalances(payload)
   }
 
   async fetchTrades(sinceTimestamp?: number, assets?: string[]): Promise<NormalizedTrade[]> {
@@ -324,17 +325,18 @@ export class BitkubAdapter implements ExchangeAdapter {
 
   private async fetchOrdersForPair(symbol: string, sinceTimestamp?: number): Promise<NormalizedTrade[]> {
     const orders: NormalizedTrade[] = []
-    let page = 1
+    let cursor = 'e30='
 
     while (true) {
-      const query = new URLSearchParams({ lmt: '100', p: String(page), sym: symbol })
+      const query = new URLSearchParams({ cursor, lmt: '100', pagination_type: 'keyset', sym: symbol })
       if (sinceTimestamp) query.set('start', String(sinceTimestamp))
 
-      const response = await this.secureGetRaw<BitkubOrder[]>('/api/v3/market/my-order-history', query)
+      const response = await this.secureGetRaw<BitkubOrder[]>('/api/v3/market/my-order-history', query) as BitkubOrderHistoryEnvelope
       const ordersPage = resolveEnvelope(response, `/api/v3/market/my-order-history${encodeQuery(query)}`)
       orders.push(...ordersPage.map((order) => mapBitkubOrder(order, symbol, order)))
-      if (ordersPage.length < 100) break
-      page += 1
+      const nextCursor = response.pagination?.cursor
+      if (response.pagination?.has_next !== true || !nextCursor || nextCursor === cursor) break
+      cursor = nextCursor
     }
 
     return orders
@@ -384,26 +386,6 @@ export class BitkubAdapter implements ExchangeAdapter {
 
   private async secureGet<T>(path: string, query = new URLSearchParams()): Promise<T> {
     return resolveEnvelope(await this.secureGetRaw<T>(path, query), `${path}${encodeQuery(query)}`)
-  }
-
-  private async securePost<T>(path: string, payload: Record<string, never>): Promise<T> {
-    const timestamp = await this.fetchServerTime()
-    const body = JSON.stringify(payload)
-    const signature = await this.sign(`${timestamp}POST${path}${body}`)
-    const response = await this.fetcher(`${baseUrl}${path}`, {
-      body,
-      headers: {
-        Accept: 'application/json',
-        'Content-Type': 'application/json',
-        'X-BTK-APIKEY': this.apiKey,
-        'X-BTK-SIGN': signature,
-        'X-BTK-TIMESTAMP': String(timestamp),
-      },
-      method: 'POST',
-    })
-
-    if (!response.ok) await requestError(response)
-    return resolveEnvelope(await response.json() as BitkubEnvelope<T>, path)
   }
 
   private async secureGetRaw<T>(path: string, query = new URLSearchParams()): Promise<BitkubEnvelope<T>> {

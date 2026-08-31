@@ -2,10 +2,11 @@
 
 ## 1. Summary
 
-A private web app that shows crypto wallet balances, transaction history,
-invested capital, and realized/unrealized P&L, pulled from exchange APIs
-(Bitkub first, Binance later). Deployed entirely on Cloudflare's free tier.
-Primary viewers (you + partner) sign in with Google.
+A private web app that shows crypto wallet balances, current valuation,
+transaction history when available, and recorded value history from exchange
+APIs (Bitkub first, Binance later). Invested capital and realized/unrealized P&L
+remain future work until complete history is verified. The app is deployed on
+Cloudflare's free tier and primary viewers sign in with Google.
 
 **Non-goals:** placing trades, withdrawing funds, tax filing/export (can be a
 future phase), multi-tenant SaaS (this is a personal app for a handful of
@@ -24,10 +25,11 @@ installation and ignored by Git. The repeatable local `npm run setup` installer
 creates D1/KV resources only after confirmation, writes ignored Worker
 configuration, applies migrations, deploys the application, and invokes
 Wrangler's hidden prompts for a first read-only Bitkub key pair. A separate
-wizard can create a non-secret additional Bitkub account row through the
-installer's authenticated Wrangler session and set the credential map through a
-hidden Wrangler prompt. Neither path may send secrets to a Moondi-operated
-server.
+wizard validates a complete replacement credential map through a hidden
+Wrangler prompt, stores that Worker secret, and only then creates the
+non-secret additional Bitkub account row. This ordering leaves existing sync
+working if setup is cancelled or the row insert fails. Neither path may send
+secrets to a Moondi-operated server.
 
 Cloudflare's deploy-button flow is not the primary distribution mechanism for
 the current architecture because it does not deploy a Pages application and a
@@ -399,8 +401,13 @@ Cron Worker (not user-facing, triggered by Cron Trigger):
   changes stored portfolio data or sync behavior. The allocation chart is a
   composition of current estimated value, not invested capital or P&L.
 - Portfolio-value history is a valuation series from balance snapshots and
-  matching price snapshots. Incomplete valuation points are excluded; the chart
-  is not invested capital or P&L.
+  matching price snapshots. One sync cycle uses one shared snapshot timestamp
+  for every account and its price set. A combined point is included only when
+  every account active at that time has a complete, priced snapshot; partial
+  account failures are omitted instead of appearing as a portfolio-value drop.
+  Current holdings likewise come from one latest complete snapshot per account,
+  rather than mixing the newest row for each asset. The chart is not invested
+  capital or P&L.
 - Cost basis and P&L remain intentionally unimplemented until trade and fiat
   history are complete and independently verified.
 - Bitkub API usage is read-only. No API/UI path for trade or withdrawal action

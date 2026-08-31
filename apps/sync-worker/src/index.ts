@@ -2,6 +2,7 @@ import { BitkubAdapter } from '@moondi/exchanges/bitkub'
 import type { NormalizedBalance, NormalizedFiatTransfer, NormalizedTrade, NormalizedTransfer, PriceQuote } from '@moondi/shared'
 import { sendPushBatch, sendPushNotification } from '@mmmike/web-push/send'
 import { credentialIssue, parseBitkubCredentialSource, resolveBitkubCredentials, scopedExchangeRecordId, type BitkubCredentials } from './account-credentials'
+import { mergeTradeAssets } from './sync-selection'
 
 declare global {
   interface SubtleCrypto {
@@ -50,18 +51,14 @@ const readOptionalSecret = (env: Env, name: string): string | undefined => {
   return typeof value === 'string' && value.length > 0 ? value : undefined
 }
 
-const hasInternalPushTestAccess = (request: Request, env: Env): boolean => {
+const hasInternalAccess = (request: Request, env: Env): boolean => {
   const expected = readOptionalSecret(env, 'INTERNAL_PUSH_TEST_TOKEN')
   const provided = request.headers.get('x-moond-internal-token')
   if (!expected || !provided) return false
-  return crypto.subtle.timingSafeEqual(new TextEncoder().encode(expected), new TextEncoder().encode(provided))
-}
-
-const hasInternalSyncAccess = (request: Request, env: Env): boolean => {
-  const expected = readOptionalSecret(env, 'INTERNAL_PUSH_TEST_TOKEN')
-  const provided = request.headers.get('x-moond-internal-token')
-  if (!expected || !provided) return false
-  return crypto.subtle.timingSafeEqual(new TextEncoder().encode(expected), new TextEncoder().encode(provided))
+  const expectedBytes = new TextEncoder().encode(expected)
+  const providedBytes = new TextEncoder().encode(provided)
+  return expectedBytes.byteLength === providedBytes.byteLength
+    && crypto.subtle.timingSafeEqual(expectedBytes, providedBytes)
 }
 
 const isPushEndpoint = (value: unknown): value is string => {
@@ -76,6 +73,14 @@ const isPushEndpoint = (value: unknown): value is string => {
 const readLastSyncedAt = async (db: D1Database, accountId: string, dataType: string): Promise<number | undefined> => {
   const result = await db.prepare('SELECT last_synced_at FROM sync_state WHERE account_id = ? AND data_type = ?').bind(accountId, dataType).first<SyncState>()
   return result?.last_synced_at
+}
+
+const readPreviouslyHeldAssets = async (db: D1Database, accountId: string): Promise<string[]> => {
+  const result = await db.prepare(`
+    SELECT DISTINCT asset FROM balance_snapshots
+    WHERE account_id = ? AND asset != 'THB' AND (available > 0 OR reserved > 0)
+  `).bind(accountId).all<{ asset: string }>()
+  return result.results.map((row) => row.asset)
 }
 
 const saveState = async (db: D1Database, accountId: string, dataType: string, timestamp: number): Promise<void> => {
@@ -331,25 +336,27 @@ const logHistoryFailure = async (env: Env, accountId: string, dataType: string, 
   await notifySyncStatus(env, accountId, dataType, 'deferred', detail)
 }
 
-const syncBitkubAccount = async (env: Env, account: Account, credentials: BitkubCredentials): Promise<void> => {
+const syncBitkubAccount = async (env: Env, account: Account, credentials: BitkubCredentials, timestamp: number): Promise<void> => {
   const adapter = new BitkubAdapter(credentials)
-  const now = Date.now()
-  const tradesSince = await readLastSyncedAt(env.DB, account.id, 'trades')
-  const cryptoSince = await readLastSyncedAt(env.DB, account.id, 'crypto_transfers')
-  const fiatSince = await readLastSyncedAt(env.DB, account.id, 'fiat_transfers')
+  const [tradesSince, cryptoSince, fiatSince, previouslyHeldAssets] = await Promise.all([
+    readLastSyncedAt(env.DB, account.id, 'trades'),
+    readLastSyncedAt(env.DB, account.id, 'crypto_transfers'),
+    readLastSyncedAt(env.DB, account.id, 'fiat_transfers'),
+    readPreviouslyHeldAssets(env.DB, account.id),
+  ])
   let balances: NormalizedBalance[]
 
   try {
     balances = await adapter.fetchBalances()
   } catch (error) {
     const detail = readError(error)
-    await saveSyncEvent(env.DB, account.id, 'balances', 'failure', detail, now)
+    await saveSyncEvent(env.DB, account.id, 'balances', 'failure', detail, timestamp)
     await notifySyncStatus(env, account.id, 'balances', 'failure', detail)
     throw error
   }
 
-  await saveBalances(env.DB, account.id, balances, now)
-  await saveSyncEvent(env.DB, account.id, 'balances', 'success', null, now)
+  await saveBalances(env.DB, account.id, balances, timestamp)
+  await saveSyncEvent(env.DB, account.id, 'balances', 'success', null, timestamp)
   await updatePushState(env.DB, account.id, 'balances', 'success', null)
 
   let trades: NormalizedTrade[] | undefined
@@ -357,18 +364,18 @@ const syncBitkubAccount = async (env: Env, account: Account, credentials: Bitkub
   try {
     trades = await adapter.fetchTrades(
       tradesSince,
-      balances
+      mergeTradeAssets(previouslyHeldAssets, balances
         .filter((balance) => balance.available > 0 || balance.reserved > 0)
-        .map((balance) => balance.asset),
+        .map((balance) => balance.asset)),
     )
   } catch (error) {
-    await logHistoryFailure(env, account.id, 'trades', error, now)
+    await logHistoryFailure(env, account.id, 'trades', error, timestamp)
   }
 
   if (trades !== undefined) {
     const insertedTrades = await saveTrades(env.DB, account.id, trades)
-    await saveState(env.DB, account.id, 'trades', now)
-    await saveSyncEvent(env.DB, account.id, 'trades', 'success', null, now)
+    await saveState(env.DB, account.id, 'trades', timestamp)
+    await saveSyncEvent(env.DB, account.id, 'trades', 'success', null, timestamp)
     await updatePushState(env.DB, account.id, 'trades', 'success', null)
     await notifyActivities(env, 'trades', account, 'Moondi มีประวัติซื้อ/ขายใหม่', insertedTrades.map((trade) => ({ amount: trade.amount, asset: trade.baseAsset, id: trade.id })))
   }
@@ -380,13 +387,13 @@ const syncBitkubAccount = async (env: Env, account: Account, credentials: Bitkub
     const withdrawals = await adapter.fetchWithdrawals(cryptoSince)
     cryptoTransfers = [...deposits, ...withdrawals]
   } catch (error) {
-    await logHistoryFailure(env, account.id, 'crypto_transfers', error, now)
+    await logHistoryFailure(env, account.id, 'crypto_transfers', error, timestamp)
   }
 
   if (cryptoTransfers !== undefined) {
     const insertedTransfers = await saveCryptoTransfers(env.DB, account.id, cryptoTransfers)
-    await saveState(env.DB, account.id, 'crypto_transfers', now)
-    await saveSyncEvent(env.DB, account.id, 'crypto_transfers', 'success', null, now)
+    await saveState(env.DB, account.id, 'crypto_transfers', timestamp)
+    await saveSyncEvent(env.DB, account.id, 'crypto_transfers', 'success', null, timestamp)
     await updatePushState(env.DB, account.id, 'crypto_transfers', 'success', null)
     await notifyActivities(env, 'cryptoTransfers', account, 'Moondi มีรายการโอนคริปโตใหม่', insertedTransfers.map((transfer) => ({ amount: transfer.amount, asset: transfer.asset, id: transfer.id })))
   }
@@ -398,13 +405,13 @@ const syncBitkubAccount = async (env: Env, account: Account, credentials: Bitkub
     const fiatWithdrawals = await adapter.fetchFiatWithdrawals?.(fiatSince) ?? []
     fiatTransfers = [...fiatDeposits, ...fiatWithdrawals]
   } catch (error) {
-    await logHistoryFailure(env, account.id, 'fiat_transfers', error, now)
+    await logHistoryFailure(env, account.id, 'fiat_transfers', error, timestamp)
   }
 
   if (fiatTransfers !== undefined) {
     const insertedTransfers = await saveFiatTransfers(env.DB, account.id, fiatTransfers)
-    await saveState(env.DB, account.id, 'fiat_transfers', now)
-    await saveSyncEvent(env.DB, account.id, 'fiat_transfers', 'success', null, now)
+    await saveState(env.DB, account.id, 'fiat_transfers', timestamp)
+    await saveSyncEvent(env.DB, account.id, 'fiat_transfers', 'success', null, timestamp)
     await updatePushState(env.DB, account.id, 'fiat_transfers', 'success', null)
     await notifyActivities(env, 'fiatTransfers', account, 'Moondi มีรายการฝาก/ถอน THB ใหม่', insertedTransfers.map((transfer) => ({ amount: transfer.amount, asset: transfer.currency, id: transfer.id })))
   }
@@ -416,9 +423,8 @@ const recordCredentialFailure = async (env: Env, account: Account, detail: strin
   await notifySyncStatus(env, account.id, 'balances', 'failure', detail)
 }
 
-const syncBitkubPrices = async (env: Env, accounts: Account[], credentials: BitkubCredentials): Promise<void> => {
+const syncBitkubPrices = async (env: Env, accounts: Account[], credentials: BitkubCredentials, timestamp: number): Promise<void> => {
   if (accounts.length === 0) return
-  const timestamp = Date.now()
   const adapter = new BitkubAdapter(credentials)
 
   try {
@@ -440,6 +446,7 @@ const syncBitkubPrices = async (env: Env, accounts: Account[], credentials: Bitk
 }
 
 const sync = async (env: Env): Promise<void> => {
+  const timestamp = Date.now()
   await pruneInactivePushSubscriptions(env.DB)
   const result = await env.DB.prepare("SELECT id, exchange, label FROM accounts WHERE exchange = 'bitkub' AND archived_at IS NULL").all<Account>()
   const accounts = result.results
@@ -459,11 +466,11 @@ const sync = async (env: Env): Promise<void> => {
     if (credentials) {
       eligible.push({ account, credentials })
     } else {
-      await recordCredentialFailure(env, account, credentialIssue(source, accounts.length), Date.now())
+      await recordCredentialFailure(env, account, credentialIssue(source, accounts.length), timestamp)
     }
   }
 
-  const outcomes = await Promise.allSettled(eligible.map(({ account, credentials }) => syncBitkubAccount(env, account, credentials)))
+  const outcomes = await Promise.allSettled(eligible.map(({ account, credentials }) => syncBitkubAccount(env, account, credentials, timestamp)))
 
   outcomes.forEach((outcome, index) => {
     if (outcome.status === 'rejected') {
@@ -474,7 +481,7 @@ const sync = async (env: Env): Promise<void> => {
   const priceCredentials = eligible[0]?.credentials
   if (!priceCredentials) return
   try {
-    await syncBitkubPrices(env, eligible.map(({ account }) => account), priceCredentials)
+    await syncBitkubPrices(env, eligible.map(({ account }) => account), priceCredentials, timestamp)
   } catch (error) {
     console.error(JSON.stringify({ error: readError(error), message: 'Bitkub price sync failed' }))
   }
@@ -505,7 +512,7 @@ export default {
   async fetch(request, env, ctx): Promise<Response> {
     const url = new URL(request.url)
     if (request.method === 'POST' && url.pathname === '/internal/push/test') {
-      if (!hasInternalPushTestAccess(request, env)) return Response.json({ error: 'Not found' }, { status: 404 })
+      if (!hasInternalAccess(request, env)) return Response.json({ error: 'Not found' }, { status: 404 })
       const body: unknown = await request.json().catch(() => null)
       const endpoint = typeof body === 'object' && body !== null ? Reflect.get(body, 'endpoint') : undefined
       if (!isPushEndpoint(endpoint)) return Response.json({ error: 'Invalid push subscription' }, { status: 400 })
@@ -518,7 +525,7 @@ export default {
       }
     }
     if (request.method === 'POST' && url.pathname === '/internal/sync/trigger') {
-      if (!hasInternalSyncAccess(request, env)) return Response.json({ error: 'Not found' }, { status: 404 })
+      if (!hasInternalAccess(request, env)) return Response.json({ error: 'Not found' }, { status: 404 })
       const accepted = await startSync(env, ctx)
       return Response.json({ accepted }, { status: accepted ? 202 : 409 })
     }

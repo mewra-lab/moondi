@@ -49,17 +49,18 @@ when exactly one Bitkub account exists. After adding a second account, configure
 failure rather than risking one account's data being stored under another.
 
 The committed `npm run setup:bitkub-account` helper is the supported way to add
-a later Bitkub account. It creates a non-secret D1 row and updates the full
-credential map through an interactive Wrangler prompt; account credentials are
-never accepted by the dashboard.
+a later Bitkub account. It validates and stores the full credential map through
+an interactive Wrangler prompt before creating the non-secret D1 row; account
+credentials are never accepted by the dashboard. The map retains credentials
+for disconnected accounts so they can be reconnected later.
 
 An account can be **disconnected** from Settings. This archives the local row:
 Moondi stops syncing it and excludes it from account scopes and aggregate views,
 but retains its normalized history. The same row can be **reconnected** from
 Settings later, which resumes sync using its existing Worker-side credential.
 Neither action deletes or reveals the Bitkub credential. If you revoked the
-key in Bitkub, use the local setup tool to configure a replacement before
-reconnecting.
+key in Bitkub, replace that account's entry in the complete Worker-side
+`BITKUB_ACCOUNTS_JSON` secret before reconnecting.
 
 ### Portfolio-value history
 
@@ -95,6 +96,13 @@ permission only. A separate,
 rate-limited Worker-delivery test sends a fixed message to the current
 subscription, verifying Worker → push service → device without waiting for a
 Bitkub event.
+
+Trade polling covers assets held now or observed in an earlier positive balance
+snapshot, so selling an observed position to zero does not stop its later
+history updates. Bitkub requires an individual symbol for each order-history
+request and retains only a bounded history window; a position bought and fully
+sold between snapshots or activity older than the provider window may still be
+unavailable. This is one reason cost basis and P&L remain disabled.
 
 ### Manual sync, account scopes, and backup
 

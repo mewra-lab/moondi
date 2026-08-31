@@ -77,11 +77,15 @@ the legacy two-secret setup: the Worker intentionally skips it and records a
 sync-health failure instead of copying balances from another account.
 
 For a repeatable and safer account-addition path, run
-`npm run setup:bitkub-account` from the repository root. The wizard first adds
-the non-secret D1 record, then accepts the complete credential map as hidden
-terminal input. It validates that the map contains exactly every active Bitkub
-account currently in D1 before using Wrangler to set it. It does not save the map to
-any file.
+`npm run setup:bitkub-account` from the repository root. The wizard reads the
+current non-secret account IDs first, then accepts the complete replacement
+credential map as hidden terminal input. It validates that the map contains
+exactly every stored Bitkub account (including disconnected accounts) plus the
+proposed new account before changing anything. Wrangler stores the secret map
+first; only after that
+succeeds does the wizard create the new active D1 row. This ordering prevents a
+cancelled or invalid setup from interrupting the existing account. The map is
+never saved to a file.
 
 ## Deploy order
 
@@ -95,8 +99,8 @@ npm run check
 npm test
 npm run build
 
-npm run deploy --workspace=@moondi/api
 npm run deploy --workspace=@moondi/sync-worker
+npm run deploy --workspace=@moondi/api
 npm run deploy --workspace=@moondi/web
 ```
 

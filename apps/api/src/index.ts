@@ -163,7 +163,10 @@ const decodeCursor = (value: string | undefined): { executedAt: number; id: stri
     const id = typeof parsed === 'object' && parsed !== null ? Reflect.get(parsed, 'id') : undefined
     if (
       typeof executedAt === 'number'
+      && Number.isFinite(executedAt)
       && typeof id === 'string'
+      && id.length > 0
+      && id.length <= 500
     ) {
       return { executedAt, id }
     }
@@ -189,10 +192,10 @@ const getArchivedAccounts = async (db: D1Database): Promise<AccountRow[]> => {
 const getHoldings = async (db: D1Database, accountId?: string): Promise<HoldingRow[]> => {
   const query = `
     WITH latest AS (
-      SELECT account_id, asset, MAX(snapshot_at) AS snapshot_at
+      SELECT account_id, MAX(snapshot_at) AS snapshot_at
       FROM balance_snapshots
       ${accountId ? 'WHERE account_id = ?1' : ''}
-      GROUP BY account_id, asset
+      GROUP BY account_id
     )
     SELECT
       balances.account_id,
@@ -201,11 +204,10 @@ const getHoldings = async (db: D1Database, accountId?: string): Promise<HoldingR
       balances.available,
       balances.reserved,
       COALESCE(prices.price, CASE balances.asset WHEN 'THB' THEN 1 ELSE 0 END) AS price,
-      prices.updated_at
+      latest.snapshot_at AS updated_at
     FROM latest
     JOIN balance_snapshots AS balances
       ON balances.account_id = latest.account_id
-      AND balances.asset = latest.asset
       AND balances.snapshot_at = latest.snapshot_at
     JOIN accounts ON accounts.id = balances.account_id AND accounts.archived_at IS NULL
     LEFT JOIN price_cache AS prices ON prices.asset = balances.asset AND prices.quote = 'THB'
@@ -218,15 +220,19 @@ const getHoldings = async (db: D1Database, accountId?: string): Promise<HoldingR
 
 const getValueHistory = async (db: D1Database, from: number, to: number, accountId?: string): Promise<ValueHistoryRow[]> => {
   const query = `
-    WITH interval_account_snapshots AS (
+    WITH scoped_accounts AS (
+      SELECT id, created_at
+      FROM accounts
+      WHERE archived_at IS NULL ${accountId ? 'AND id = ?3' : ''}
+    ),
+    interval_account_snapshots AS (
       SELECT
         account_id,
         snapshot_at / 1800000 AS interval,
         MAX(snapshot_at) AS snapshot_at
       FROM balance_snapshots
-      WHERE snapshot_at >= ? AND snapshot_at <= ?
-        AND account_id IN (SELECT id FROM accounts WHERE archived_at IS NULL)
-        ${accountId ? 'AND account_id = ?' : ''}
+      WHERE snapshot_at >= ?1 AND snapshot_at <= ?2
+        AND account_id IN (SELECT id FROM scoped_accounts)
       GROUP BY account_id, interval
     ),
     interval_account_values AS (
@@ -251,11 +257,24 @@ const getValueHistory = async (db: D1Database, from: number, to: number, account
         AND prices.quote = 'THB'
         AND prices.snapshot_at = snapshots.snapshot_at
       GROUP BY snapshots.interval, snapshots.account_id, snapshots.snapshot_at
+    ),
+    interval_portfolio_values AS (
+      SELECT
+        interval,
+        MAX(snapshot_at) AS snapshot_at,
+        SUM(total_value) AS total_value,
+        SUM(unpriced_assets) AS unpriced_assets,
+        COUNT(DISTINCT account_id) AS account_count
+      FROM interval_account_values
+      GROUP BY interval
     )
-    SELECT MAX(snapshot_at) AS snapshot_at, SUM(total_value) AS total_value
-    FROM interval_account_values
-    GROUP BY interval
-    HAVING SUM(unpriced_assets) = 0
+    SELECT snapshot_at, total_value
+    FROM interval_portfolio_values AS portfolio
+    WHERE unpriced_assets = 0
+      AND account_count = (
+        SELECT COUNT(*) FROM scoped_accounts
+        WHERE created_at <= portfolio.snapshot_at
+      )
     ORDER BY snapshot_at
   `
   const result = await (accountId ? db.prepare(query).bind(from, to, accountId) : db.prepare(query).bind(from, to)).all<ValueHistoryRow>()
@@ -437,7 +456,22 @@ const isPushSubscriptionInput = (value: unknown): value is PushSubscriptionInput
   const keys = Reflect.get(value, 'keys')
   const p256dh = typeof keys === 'object' && keys !== null ? Reflect.get(keys, 'p256dh') : undefined
   const auth = typeof keys === 'object' && keys !== null ? Reflect.get(keys, 'auth') : undefined
-  return typeof endpoint === 'string' && endpoint.startsWith('https://') && typeof p256dh === 'string' && p256dh.length > 0 && typeof auth === 'string' && auth.length > 0
+  if (
+    typeof endpoint !== 'string'
+    || endpoint.length > 2_048
+    || typeof p256dh !== 'string'
+    || p256dh.length === 0
+    || p256dh.length > 512
+    || typeof auth !== 'string'
+    || auth.length === 0
+    || auth.length > 512
+  ) return false
+
+  try {
+    return new URL(endpoint).protocol === 'https:'
+  } catch {
+    return false
+  }
 }
 
 const isPushNotificationPreferences = (value: unknown): value is PushNotificationPreferences => (
@@ -761,7 +795,9 @@ const api = factory
     const transactionType = c.req.query('type')
     const from = normalizeTimestamp(c.req.query('from'))
     const to = normalizeTimestamp(c.req.query('to'))
-    const cursor = decodeCursor(c.req.query('cursor'))
+    const rawCursor = c.req.query('cursor')
+    const cursor = decodeCursor(rawCursor)
+    if (rawCursor && !cursor) return c.json({ error: 'Invalid transaction cursor' }, 400)
     const conditions = ['1 = 1']
     const bindings: Array<string | number> = []
 
@@ -801,7 +837,7 @@ const api = factory
       ) AS records
       JOIN accounts ON accounts.id = records.account_id AND accounts.archived_at IS NULL
       WHERE ${conditions.join(' AND ')}
-      ORDER BY records.executed_at DESC
+      ORDER BY records.executed_at DESC, records.id DESC
       LIMIT ?
     `
     const result = await c.env.DB.prepare(query).bind(...bindings).all<TransactionRow>()
@@ -813,6 +849,10 @@ const app = factory
   .createApp()
   .use('*', async (c, next) => {
     const allowedOrigin = readString(c.env, 'ALLOWED_ORIGIN') ?? 'http://localhost:5173'
+    const requestOrigin = c.req.header('Origin')
+    if (!['GET', 'HEAD', 'OPTIONS'].includes(c.req.method) && requestOrigin && requestOrigin !== allowedOrigin) {
+      return c.json({ error: 'Origin not allowed' }, 403)
+    }
     return cors({ allowHeaders: ['Content-Type'], allowMethods: ['DELETE', 'GET', 'PATCH', 'POST', 'PUT'], credentials: true, origin: allowedOrigin })(c, next)
   })
   .get('/health', (c) => c.json({ status: 'ok' }))
