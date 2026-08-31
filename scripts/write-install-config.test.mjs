@@ -6,6 +6,8 @@ import { configureWorkerExamples } from './write-install-config.mjs'
 test('writes installation-specific binding names without changing the examples', () => {
   const apiExample = {
     name: 'moondi-api',
+    workers_dev: true,
+    preview_urls: false,
     vars: { ALLOWED_ORIGIN: 'https://your-pages-project.pages.dev' },
     d1_databases: [{ binding: 'DB', database_name: 'moondi', database_id: 'placeholder' }],
     kv_namespaces: [{ binding: 'CACHE', id: 'placeholder' }],
@@ -13,6 +15,8 @@ test('writes installation-specific binding names without changing the examples',
   }
   const syncExample = {
     name: 'moondi-sync',
+    workers_dev: false,
+    preview_urls: false,
     d1_databases: [{ binding: 'DB', database_name: 'moondi', database_id: 'placeholder' }],
     kv_namespaces: [{ binding: 'CACHE', id: 'placeholder' }],
   }
@@ -33,6 +37,10 @@ test('writes installation-specific binding names without changing the examples',
   assert.equal(api.name, 'owner-api')
   assert.equal(sync.name, 'owner-sync')
   assert.equal(api.vars.ALLOWED_ORIGIN, 'https://owner.pages.dev')
+  assert.equal(api.workers_dev, true)
+  assert.equal(api.preview_urls, false)
+  assert.equal(sync.workers_dev, false)
+  assert.equal(sync.preview_urls, false)
   assert.equal(api.services[0].service, 'owner-sync')
   assert.equal(api.d1_databases[0].database_name, 'owner-db')
   assert.equal(sync.d1_databases[0].database_id, '11111111-1111-1111-1111-111111111111')

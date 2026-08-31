@@ -71,9 +71,12 @@ Create one D1 database and one KV namespace in your Cloudflare account. Put
 their IDs in both copied Wrangler configuration files. Keep the same binding
 names: `DB` and `CACHE`.
 
-Choose unique Worker names. For a first deployment, leave `workers_dev` enabled
-in the template. Configure custom domains only after the basic installation
-works.
+Choose unique Worker names. The Sync Worker stays private because it is reached
+through a Service binding and cron; do not enable `workers_dev` or preview URLs
+for it. The API template enables only its production `workers.dev` URL for
+bootstrap. Protect that URL with Cloudflare Access before setting Bitkub
+credentials, and disable it after moving the API to a protected custom domain.
+Do not enable API preview URLs.
 
 ## 3. Configure development secrets
 

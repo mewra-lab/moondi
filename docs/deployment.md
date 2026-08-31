@@ -29,9 +29,14 @@ placeholders. Keep these details aligned between the two Workers:
 - same KV namespace ID for binding `CACHE`; and
 - a compatible `compatibility_date` and flags.
 
-For initial deployment, `workers_dev` can remain enabled. After verifying the
-Workers, add your own custom domains/routes and update `ALLOWED_ORIGIN` to the
-exact Pages/custom domain origin (scheme and hostname, no trailing path).
+The Sync Worker template is private: keep `workers_dev` and `preview_urls`
+disabled because API-to-Sync calls use the Service binding and cron does not
+need an HTTP hostname. The API template temporarily enables `workers_dev` for
+bootstrap but disables preview URLs. Protect that exact API hostname with
+Cloudflare Access before adding exchange credentials. After moving the API to
+a protected custom domain, set `workers_dev` to `false` as well. Update
+`ALLOWED_ORIGIN` to the exact Pages/custom-domain origin (scheme and hostname,
+no trailing path).
 
 ## Apply migrations
 
@@ -111,11 +116,18 @@ Pages production branch.
 
 ## Access and CORS
 
-1. Create a Cloudflare Access application for the Pages hostname.
-2. Create another application for the API hostname.
+1. Create a Cloudflare Access application for the API hostname before setting
+   exchange credentials or allowing the first sync.
+2. Create Access applications for the preferred Pages/custom-domain hostname,
+   the production `PROJECT.pages.dev` hostname, and enabled
+   `*.PROJECT.pages.dev` previews. Alternatively, redirect the production
+   `pages.dev` hostname to the protected custom domain and still protect or
+   disable previews.
 3. Use Google as the identity provider and an explicit email allow-list.
 4. Confirm an unauthorized Google account is rejected.
 5. Confirm `ALLOWED_ORIGIN` equals the deployed web origin exactly.
+6. From a cookie-free `curl` or private browser, confirm every protected
+   hostname redirects to Cloudflare Access instead of returning HTML or JSON.
 
 Cloudflare Access is the security boundary. CORS only controls which browser
 origins can read responses; it does not protect an API by itself.
@@ -130,6 +142,10 @@ form-encoded `POST` routes for watchlists, allocation targets, and price alerts.
 ## First-production verification
 
 - Visit `/health` on the API Worker and verify `{ "status": "ok" }`.
+- Repeat the API health check without Access cookies and verify it redirects to
+  Access rather than returning JSON.
+- Check the production `PROJECT.pages.dev` and an enabled preview hostname
+  without Access cookies; neither may return the dashboard directly.
 - Sign into the Pages app through Access with an allowed account.
 - Confirm the dashboard loads and no secret appears in browser network data.
 - Confirm the sync Worker has a scheduled trigger.

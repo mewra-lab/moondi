@@ -183,7 +183,7 @@ finish() {
 # STAGES: first self-hosted installation. This is intentionally local-only.
 # ──────────────────────────────────────────────────────────────────────────
 
-TOTAL_STAGES=8
+TOTAL_STAGES=9
 
 if [[ "${1:-}" == "--help" ]]; then
   printf '%s\n' 'Usage: npm run setup'
@@ -308,6 +308,29 @@ npm run deploy --workspace @moondi/sync-worker
 npm run deploy --workspace @moondi/api
 say "Copy the API Worker HTTPS URL printed by the second deployment; you will paste it in the next stage."
 
+stage "Protect the API before credentials"
+ask API_ORIGIN "Paste the API Worker HTTPS origin printed earlier:"
+validate_origin "$API_ORIGIN"
+ENV_FILE=apps/web/.env
+write_env VITE_API_BASE_URL "$API_ORIGIN"
+say "The API contains only an empty account shell at this point. Lock it before any Bitkub data can sync."
+open_url "https://one.dash.cloudflare.com/"
+step "Create a self-hosted Access application for $API_ORIGIN."
+step "Use Google with an explicit owner-email allow-list; never use an Allow Everyone policy."
+step "Test the API URL in a private browser and confirm Cloudflare asks you to sign in."
+pause "Press Enter after the API Access policy is active."
+if command -v curl >/dev/null 2>&1; then
+  API_REDIRECT=$(curl --silent --show-error --output /dev/null --write-out '%{redirect_url}' "$API_ORIGIN/health" || true)
+  if [[ "$API_REDIRECT" == https://*.cloudflareaccess.com/* ]]; then
+    say "Cookie-free API check was redirected to Cloudflare Access."
+  else
+    die "The API did not redirect a cookie-free request to Cloudflare Access. Fix its Access application before storing credentials."
+  fi
+else
+  warn "curl is unavailable, so the wizard cannot verify the API redirect automatically."
+  confirm "I verified the API Access redirect in a private browser" || die 'Cancelled before storing exchange credentials.'
+fi
+
 stage "Set the Bitkub read-only credentials"
 warn 'Use a dedicated Bitkub API key with read access only. Never enable trade or withdrawal permissions.'
 say "Wrangler will now prompt for the key and secret directly. They are not written to this script, configuration files, Git, or the browser."
@@ -318,27 +341,26 @@ run_wrangler secret put BITKUB_API_SECRET --config apps/sync-worker/wrangler.jso
 say "The Bitkub credentials are stored only as Cloudflare Worker secrets."
 
 stage "Deploy the private dashboard"
-ask API_ORIGIN "Paste the API Worker HTTPS origin printed earlier:"
-validate_origin "$API_ORIGIN"
-ENV_FILE=apps/web/.env
-write_env VITE_API_BASE_URL "$API_ORIGIN"
 npm run build --workspace @moondi/web
 run_wrangler pages deploy apps/web/dist --project-name "$PAGES_PROJECT_NAME"
 say "Pages deployment is complete at $PAGES_ORIGIN."
-if command -v curl >/dev/null 2>&1; then
-  if curl --fail --silent --show-error "$API_ORIGIN/health" >/dev/null; then
-    say "API health check succeeded."
-  else
-    warn 'The API health check did not succeed yet. Check the pasted API origin and Worker deployment before adding Access.'
-  fi
-fi
 
 stage "Protect and verify"
 say "Cloudflare Access is intentionally a manual final step: it determines who may see financial data."
 open_url "https://one.dash.cloudflare.com/"
-step "Create Access applications for the Pages origin and API origin. Use Google and an explicit email allow-list; do not allow every Google account."
+step "Protect the production hostname $PAGES_ORIGIN with the same explicit owner-email allow-list."
+step "In Pages settings, enable Access for preview deployments too; previews are public by default."
+step "If you add a custom domain, create a separate Access application for it and keep the pages.dev hostname protected."
 step "Open $PAGES_ORIGIN, sign in through Access, then check Sync health after the scheduled read-only sync."
 note "The first price chart appears after enough recorded snapshots. Browser push and manual sync are optional follow-up features; see docs/quickstart.md."
-pause "Press Enter after recording the Access checklist."
+pause "Press Enter after the Pages production and preview Access policies are active."
+if command -v curl >/dev/null 2>&1; then
+  PAGES_REDIRECT=$(curl --silent --show-error --output /dev/null --write-out '%{redirect_url}' "$PAGES_ORIGIN" || true)
+  if [[ "$PAGES_REDIRECT" == https://*.cloudflareaccess.com/* ]]; then
+    say "Cookie-free Pages check was redirected to Cloudflare Access."
+  else
+    die "The production pages.dev hostname is still public. Protect it with Access before finishing."
+  fi
+fi
 
 finish
