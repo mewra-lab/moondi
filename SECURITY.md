@@ -32,6 +32,18 @@ any route capable of initiating an exchange action.
 Moondi is intended to remain read-only. A mechanism that enables trades or
 withdrawals is a high-severity issue.
 
+## Dependency supply chain
+
+- Commit `package-lock.json`; install it with `npm ci` for repeatable builds.
+- CI runs `npm audit` for known advisories and `npm audit signatures` to verify
+  npm registry signatures and available provenance attestations.
+- Prefer platform-vendor packages or packages named in the official platform
+  documentation. Evaluate new direct dependencies for maintainer, release
+  maturity, transitive dependency count, and Worker/browser compatibility
+  before adding them.
+- Do not use `npm audit fix --force` as an unattended update mechanism. Review
+  every major version change and regenerate the lockfile intentionally.
+
 ## Response
 
 The maintainer will acknowledge a valid report, assess impact, coordinate a

@@ -66,7 +66,7 @@ your account, and a Bitkub **read-only** API key.
 ```bash
 git clone https://github.com/mewra-lab/moondi.git
 cd moondi
-npm install
+npm ci
 
 npm run setup
 ```

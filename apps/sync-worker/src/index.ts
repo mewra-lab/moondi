@@ -1,6 +1,7 @@
 import { BitkubAdapter } from '@moondi/exchanges/bitkub'
 import type { NormalizedBalance, NormalizedFiatTransfer, NormalizedTrade, NormalizedTransfer, PriceQuote } from '@moondi/shared'
-import { sendPushBatch, sendPushNotification } from '@mmmike/web-push/send'
+import * as webpush from 'web-push'
+import type { PushSubscription as WebPushSubscription, RequestOptions as WebPushRequestOptions } from 'web-push'
 import { credentialIssue, parseBitkubCredentialSource, resolveBitkubCredentials, scopedExchangeRecordId, type BitkubCredentials } from './account-credentials'
 import { mergeTradeAssets } from './sync-selection'
 
@@ -32,6 +33,8 @@ type PushSubscriptionRow = {
 }
 
 type PushNotificationType = 'cryptoTransfers' | 'fiatTransfers' | 'priceAlerts' | 'syncIssues' | 'trades'
+
+type PushDelivery = 'delivered' | 'failed' | 'gone'
 
 const pushPreferenceColumn: Record<PushNotificationType, keyof PushSubscriptionRow> = {
   cryptoTransfers: 'notify_crypto_transfers',
@@ -211,6 +214,31 @@ const pruneInactivePushSubscriptions = async (db: D1Database): Promise<void> => 
   await db.prepare('DELETE FROM push_subscriptions WHERE updated_at < ?').bind(Date.now() - pushSubscriptionRetentionMs).run()
 }
 
+const asWebPushSubscription = (subscription: Pick<PushSubscriptionRow, 'auth' | 'endpoint' | 'p256dh'>): WebPushSubscription => ({
+  endpoint: subscription.endpoint,
+  keys: { auth: subscription.auth, p256dh: subscription.p256dh },
+})
+
+const pushOptions = (publicKey: string, privateKey: string, subject: string, ttl: number, urgency: WebPushRequestOptions['urgency']): WebPushRequestOptions => ({
+  TTL: ttl,
+  urgency,
+  vapidDetails: { privateKey, publicKey, subject },
+})
+
+const sendPushNotification = async (
+  subscription: WebPushSubscription,
+  payload: { body: string; tag: string; title: string; url: string },
+  options: WebPushRequestOptions,
+): Promise<PushDelivery> => {
+  try {
+    await webpush.sendNotification(subscription, JSON.stringify(payload), options)
+    return 'delivered'
+  } catch (error) {
+    if (error instanceof webpush.WebPushError && (error.statusCode === 404 || error.statusCode === 410)) return 'gone'
+    return 'failed'
+  }
+}
+
 const sendPush = async (env: Env, notificationType: PushNotificationType, payload: { body: string; tag: string; title: string }): Promise<void> => {
   const publicKey = readOptionalSecret(env, 'VAPID_PUBLIC_KEY')
   const privateKey = readOptionalSecret(env, 'VAPID_PRIVATE_KEY')
@@ -225,14 +253,18 @@ const sendPush = async (env: Env, notificationType: PushNotificationType, payloa
       FROM push_subscriptions WHERE ${preferenceColumn} = 1
     `).all<PushSubscriptionRow>()
     if (subscriptions.results.length === 0) return
-    const result = await sendPushBatch(
-      subscriptions.results.map((subscription) => ({ endpoint: subscription.endpoint, keys: { auth: subscription.auth, p256dh: subscription.p256dh } })),
-      { ...payload, url: '/' },
-      { privateKey, publicKey, subject },
-      { concurrency: 5, ttl: 60 * 60 },
-    )
-    if (result.gone.length > 0) await env.DB.batch(result.gone.map((endpoint) => env.DB.prepare('DELETE FROM push_subscriptions WHERE endpoint = ?').bind(endpoint)))
-    if (result.failed.length > 0) console.warn(JSON.stringify({ failedPushCount: result.failed.length, message: 'Push notification delivery failed' }))
+    const deliveries = await Promise.all(subscriptions.results.map(async (subscription) => ({
+      endpoint: subscription.endpoint,
+      status: await sendPushNotification(
+        asWebPushSubscription(subscription),
+        { ...payload, url: '/' },
+        pushOptions(publicKey, privateKey, subject, 60 * 60, 'normal'),
+      ),
+    })))
+    const gone = deliveries.filter((delivery) => delivery.status === 'gone').map((delivery) => delivery.endpoint)
+    if (gone.length > 0) await env.DB.batch(gone.map((endpoint) => env.DB.prepare('DELETE FROM push_subscriptions WHERE endpoint = ?').bind(endpoint)))
+    const failedPushCount = deliveries.filter((delivery) => delivery.status === 'failed').length
+    if (failedPushCount > 0) console.warn(JSON.stringify({ failedPushCount, message: 'Push notification delivery failed' }))
   } catch (error) {
     console.warn(JSON.stringify({ error: readError(error), message: 'Push notification delivery failed' }))
   }
@@ -283,19 +315,18 @@ const sendPushTest = async (env: Env, endpoint: string): Promise<boolean> => {
   `).bind(endpoint).first<PushSubscriptionRow>()
   if (!subscription) return false
 
-  const delivered = await sendPushNotification(
-    { endpoint: subscription.endpoint, keys: { auth: subscription.auth, p256dh: subscription.p256dh } },
+  const delivery = await sendPushNotification(
+    asWebPushSubscription(subscription),
     {
       body: 'Worker delivery to this device is working.',
       tag: 'moondi-worker-push-test',
       title: 'Moondi',
       url: '/',
     },
-    { privateKey, publicKey, subject },
-    { ttl: 60, urgency: 'high' },
+    pushOptions(publicKey, privateKey, subject, 60, 'high'),
   )
-  if (!delivered) await env.DB.prepare('DELETE FROM push_subscriptions WHERE endpoint = ?').bind(endpoint).run()
-  return delivered
+  if (delivery === 'gone') await env.DB.prepare('DELETE FROM push_subscriptions WHERE endpoint = ?').bind(endpoint).run()
+  return delivery === 'delivered'
 }
 
 const notifySyncStatus = async (env: Env, accountId: string, dataType: string, status: 'success' | 'deferred' | 'failure', detail: string | null): Promise<void> => {

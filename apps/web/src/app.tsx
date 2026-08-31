@@ -1,8 +1,8 @@
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, type TouchEvent } from 'react'
 import { useRegisterSW } from 'virtual:pwa-register/react'
-import { getCurrentSubscription, isPushSupported, subscribe, unsubscribe } from '@mmmike/web-push/client'
 import { addPriceAlert, addWatchlistAsset, apiAccessRequired, apiAccessUrl, archiveAccount, loadAccounts, loadArchivedAccounts, loadAssetPriceHistories, loadAssetPriceHistory, loadBackup, loadDashboard, loadPushPublicKey, loadSyncEvents, loadTransactions, loadValueHistory, removeAllocationTarget, removePriceAlert, removePushSubscription, removeWatchlistAsset, restoreAccount, saveAllocationTarget, savePushSubscription, testPushDelivery, triggerManualSync } from './api'
 import type { Account, AllocationTarget, Dashboard, Holding, Portfolio, PriceAlert, PriceHistoryPoint, PushNotificationPreferences, SyncEvent, SyncStatus, Transaction, ValueHistoryPoint, WatchlistAsset } from './api'
+import { getCurrentPushSubscription, isPushSupported, subscribeToPush, unsubscribeFromPush } from './push'
 
 type View = 'overview' | 'history' | 'sync' | 'transactions'
 type Theme = 'light' | 'dark'
@@ -1343,7 +1343,7 @@ const NotificationSettings = ({ language }: { language: Language }) => {
 
     let isCurrent = true
 
-    void getCurrentSubscription().then((subscription) => {
+    void getCurrentPushSubscription().then((subscription) => {
       if (!isCurrent || !subscription) return
       setIsSubscribed(true)
       void savePushSubscription(subscription.toJSON(), preferences).catch(() => undefined)
@@ -1368,7 +1368,7 @@ const NotificationSettings = ({ language }: { language: Language }) => {
     setMessage(null)
     setRequiresApiAccess(false)
     try {
-      const result = await subscribe(await loadPushPublicKey())
+      const result = await subscribeToPush(await loadPushPublicKey())
       if (result.status === 'denied') {
         setMessage(language === 'th' ? 'เบราว์เซอร์ปิดสิทธิ์การแจ้งเตือนอยู่' : 'Notifications are blocked by this browser.')
         return
@@ -1392,7 +1392,7 @@ const NotificationSettings = ({ language }: { language: Language }) => {
     setMessage(null)
     setRequiresApiAccess(false)
     try {
-      const endpoint = await unsubscribe()
+      const endpoint = await unsubscribeFromPush()
       setIsSubscribed(false)
       if (endpoint) {
         try {
@@ -1418,7 +1418,7 @@ const NotificationSettings = ({ language }: { language: Language }) => {
     setIsWorking(true)
     setMessage(null)
     setRequiresApiAccess(false)
-    void getCurrentSubscription()
+    void getCurrentPushSubscription()
       .then((subscription) => subscription ? savePushSubscription(subscription.toJSON(), next) : undefined)
       .then(() => setMessage(language === 'th' ? 'บันทึกประเภทการแจ้งเตือนแล้ว' : 'Notification types saved.'))
       .catch(showError)
@@ -1453,7 +1453,7 @@ const NotificationSettings = ({ language }: { language: Language }) => {
     setMessage(null)
     setRequiresApiAccess(false)
     try {
-      const subscription = await getCurrentSubscription()
+      const subscription = await getCurrentPushSubscription()
       if (!subscription) {
         setMessage(language === 'th' ? 'ไม่พบการสมัครแจ้งเตือนของอุปกรณ์นี้ กรุณาเชื่อมใหม่' : 'No active subscription was found for this device. Reconnect notifications.')
         return

@@ -32,6 +32,12 @@ jobs:
       - name: Install locked dependencies
         run: npm ci
 
+      - name: Audit dependency advisories
+        run: npm run audit
+
+      - name: Verify npm registry signatures and provenance
+        run: npm run audit:signatures
+
       - name: Generate Worker types from public example configuration
         run: |
           npm run types --workspace @moondi/api -- --config wrangler.example.jsonc
