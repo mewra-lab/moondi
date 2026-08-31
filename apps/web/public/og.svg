@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
+  <rect width="1200" height="630" fill="#14191d"/>
+  <path d="M80 505C220 195 385 95 590 95C795 95 955 195 1120 505" fill="none" stroke="#e9915e" stroke-linecap="round" stroke-width="36"/>
+  <circle cx="600" cy="485" r="28" fill="#ece8df"/>
+  <text x="80" y="110" fill="#ece8df" font-family="monospace" font-size="52" font-weight="700">moondi<tspan fill="#e9915e">.</tspan></text>
+  <text x="80" y="538" fill="#ece8df" font-family="Arial, sans-serif" font-size="52" font-weight="700">Private crypto portfolio</text>
+  <text x="84" y="582" fill="#a9afa8" font-family="monospace" font-size="22" letter-spacing="3">A QUIET VIEW OF WHAT YOU HOLD</text>
+</svg>

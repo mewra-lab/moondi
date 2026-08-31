@@ -1,0 +1,42 @@
+{
+  "name": "moondi",
+  "private": true,
+  "version": "0.1.0",
+  "description": "A read-only, self-hosted crypto portfolio dashboard for Bitkub.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mewra-lab/moondi.git"
+  },
+  "bugs": {
+    "url": "https://github.com/mewra-lab/moondi/issues"
+  },
+  "homepage": "https://github.com/mewra-lab/moondi#readme",
+  "keywords": [
+    "bitkub",
+    "cloudflare-workers",
+    "crypto",
+    "portfolio",
+    "pwa",
+    "self-hosted"
+  ],
+  "packageManager": "npm@11.13.0",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "check": "npm run check --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "setup:bitkub-account": "./scripts/add-bitkub-account.sh",
+    "dev:web": "npm run dev --workspace @moondi/web",
+    "dev:api": "npm run dev --workspace @moondi/api",
+    "dev:sync": "npm run dev --workspace @moondi/sync-worker"
+  },
+  "devDependencies": {
+    "@types/node": "^26.3.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.4"
+  }
+}

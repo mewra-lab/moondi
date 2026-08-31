@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Generate Worker types from public example configuration
+        run: |
+          npm run types --workspace @moondi/api -- --config wrangler.example.jsonc
+          npm run types --workspace @moondi/sync-worker -- --config wrangler.example.jsonc
+
+      - name: Type-check
+        run: npm run check
+
+      - name: Run tests
+        run: npm test
+
+      - name: Build production web app
+        run: npm run build

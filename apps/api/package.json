@@ -1,0 +1,21 @@
+{
+  "name": "@moondi/api",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "dependencies": {
+    "@moondi/shared": "*",
+    "hono": "^4.11.7"
+  },
+  "devDependencies": {
+    "wrangler": "^4.63.0"
+  },
+  "scripts": {
+    "check": "tsc -p tsconfig.json",
+    "dev": "wrangler dev",
+    "types": "wrangler types",
+    "test": "vitest run",
+    "deploy": "wrangler deploy",
+    "deploy:dry": "wrangler deploy --dry-run"
+  }
+}
