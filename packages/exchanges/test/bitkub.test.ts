@@ -60,6 +60,28 @@ describe('Bitkub mapping', () => {
     await expect(adapter.fetchBalances()).resolves.toEqual([{ asset: 'BTC', available: 1, reserved: 0 }])
   })
 
+  it('bypasses cache for Bitkub server time and signed requests', async () => {
+    const responses = [
+      Response.json(1_700_000_000_000),
+      Response.json({ result: [{ available: '1', currency: 'BTC', reserved: '0' }] }),
+    ]
+    const requests: Array<{ input: RequestInfo | URL; init: RequestInit | undefined }> = []
+    const fetcher: typeof fetch = async (input, init) => {
+      requests.push({ input, init })
+      const response = responses.shift()
+      if (!response) throw new Error('unexpected request')
+      return response
+    }
+    const adapter = new BitkubAdapter({ apiKey: 'key', apiSecret: 'secret', fetcher })
+
+    await adapter.fetchBalances()
+
+    expect(String(requests[0]?.input)).toContain('/api/v3/servertime')
+    expect(requests[0]?.init?.cache).toBe('no-store')
+    expect(String(requests[1]?.input)).toContain('/api/v4/wallet/balances')
+    expect(requests[1]?.init?.cache).toBe('no-store')
+  })
+
   it('reports Bitkub authentication error details without request credentials', async () => {
     const responses = [
       Response.json(1_700_000_000_000),

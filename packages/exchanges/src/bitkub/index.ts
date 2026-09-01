@@ -393,6 +393,9 @@ export class BitkubAdapter implements ExchangeAdapter {
     const requestPath = `${path}${encodeQuery(query)}`
     const signature = await this.sign(`${timestamp}GET${requestPath}`)
     const response = await this.fetcher(`${baseUrl}${requestPath}`, {
+      // A signed request must always reach Bitkub. Serving a cached response
+      // would decouple it from the one-time server timestamp in its signature.
+      cache: 'no-store',
       headers: {
         Accept: 'application/json',
         'Content-Type': 'application/json',
@@ -407,7 +410,9 @@ export class BitkubAdapter implements ExchangeAdapter {
   }
 
   private async fetchServerTime(): Promise<number> {
-    const response = await this.fetcher(`${baseUrl}/api/v3/servertime`)
+    // Bitkub requires a newly obtained millisecond timestamp for every signed
+    // request. Workers subrequests may otherwise interact with Cloudflare cache.
+    const response = await this.fetcher(`${baseUrl}/api/v3/servertime`, { cache: 'no-store' })
     if (!response.ok) throw new Error(`Bitkub server-time request failed: ${response.status}`)
 
     const timestamp = Number(await response.json())
