@@ -337,6 +337,22 @@ describe('API worker', () => {
     expect(query).toContain('SELECT COUNT(*) FROM scoped_accounts')
   })
 
+  it('matches portfolio history prices from the same sync window when timestamps differ slightly', async () => {
+    const all = vi.fn().mockResolvedValue({ results: [] })
+    const bind = vi.fn().mockReturnValue({ all })
+    const prepare = vi.fn().mockReturnValue({ bind })
+    await app.request(
+      '/api/history/value?days=1',
+      undefined,
+      { CACHE: {} as KVNamespace, DB: { prepare } as unknown as D1Database },
+    )
+
+    const query = prepare.mock.calls[0]?.[0] as string
+    expect(query).not.toContain('AND prices.snapshot_at = snapshots.snapshot_at')
+    expect(query).toContain('candidate.snapshot_at BETWEEN snapshots.snapshot_at - 300000')
+    expect(query).toContain('ORDER BY ABS(candidate.snapshot_at - snapshots.snapshot_at), candidate.snapshot_at DESC')
+  })
+
   it('builds current holdings from one complete latest account snapshot', async () => {
     const all = vi.fn().mockResolvedValue({ results: [] })
     const prepare = vi.fn().mockReturnValue({ all })

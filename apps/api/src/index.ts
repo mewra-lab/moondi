@@ -120,6 +120,11 @@ type AllocationTargetRow = {
   updated_at: number
 }
 
+// Balance and price collection happen in one scheduled sync, but the exchange
+// calls may finish seconds apart. Accept only the closest price in that small
+// window so portfolio history remains a point-in-time value, not a stale quote.
+const portfolioHistoryPriceToleranceMs = 5 * 60 * 1_000
+
 const defaultPushNotificationPreferences: PushNotificationPreferences = {
   cryptoTransfers: true,
   fiatTransfers: true,
@@ -255,7 +260,16 @@ const getValueHistory = async (db: D1Database, from: number, to: number, account
       LEFT JOIN price_snapshots AS prices
         ON prices.asset = balances.asset
         AND prices.quote = 'THB'
-        AND prices.snapshot_at = snapshots.snapshot_at
+        AND prices.snapshot_at = (
+          SELECT candidate.snapshot_at
+          FROM price_snapshots AS candidate
+          WHERE candidate.asset = balances.asset
+            AND candidate.quote = 'THB'
+            AND candidate.snapshot_at BETWEEN snapshots.snapshot_at - ${portfolioHistoryPriceToleranceMs}
+              AND snapshots.snapshot_at + ${portfolioHistoryPriceToleranceMs}
+          ORDER BY ABS(candidate.snapshot_at - snapshots.snapshot_at), candidate.snapshot_at DESC
+          LIMIT 1
+        )
       GROUP BY snapshots.interval, snapshots.account_id, snapshots.snapshot_at
     ),
     interval_portfolio_values AS (
