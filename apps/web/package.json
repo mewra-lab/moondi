@@ -21,6 +21,7 @@
     "check": "tsc -p tsconfig.json",
     "dev": "vite",
     "preview": "vite preview",
+    "test": "vitest run",
     "deploy": "wrangler pages deploy dist --project-name=moondi --branch=production"
   }
 }

@@ -29,6 +29,7 @@ export type Transaction = {
   asset: string
   amount: number
   quote_asset: string | null
+  quote_amount: number | null
   price: number | null
   fee: number
   executed_at: number
@@ -168,10 +169,6 @@ export const archiveAccount = async (accountId: string): Promise<void> => {
 export const restoreAccount = async (accountId: string): Promise<void> => {
   await request<{ ok: true }>(`/api/accounts/${encodeURIComponent(accountId)}/restore`, { method: 'POST' })
 }
-
-export const triggerManualSync = async (): Promise<{ retryAt: number }> => (
-  await request<{ accepted: true; retryAt: number }>('/api/sync/trigger', { method: 'POST' })
-)
 
 export const loadDashboard = async (accountId?: string): Promise<Dashboard> => {
   const scope = scopedQuery(accountId)

@@ -2,6 +2,7 @@ import { asNumber, toMilliseconds } from '@moondi/shared'
 import type { ExchangeAdapter, NormalizedBalance, NormalizedFiatTransfer, NormalizedTrade, NormalizedTransfer, PriceQuote } from '@moondi/shared'
 
 const baseUrl = 'https://api.bitkub.com'
+const maxPaginationPages = 1_000
 
 type Fetcher = typeof fetch
 
@@ -78,6 +79,7 @@ type BitkubPage<T> = {
 
 type BitkubSymbol = {
   source?: string
+  status?: string
   symbol: string
 }
 
@@ -167,21 +169,24 @@ export const mapBitkubBalances = (balances: BitkubBalance[]): NormalizedBalance[
   }))
 
 export const mapBitkubOrder = (order: BitkubOrder, quoteAsset: string, raw: unknown): NormalizedTrade => {
-  const [baseAsset] = quoteAsset.split('_')
+  const separator = quoteAsset.lastIndexOf('_')
+  const baseAsset = quoteAsset.slice(0, separator)
+  const resolvedQuoteAsset = quoteAsset.slice(separator + 1)
 
-  if (!baseAsset) {
+  if (!baseAsset || !resolvedQuoteAsset) {
     throw new Error(`Invalid Bitkub symbol: ${quoteAsset}`)
   }
 
   const price = asNumber(order.rate)
   const fee = asNumber(order.fee)
   const creditedFee = asNumber(order.credit ?? 0)
-  const quoteAmount = asNumber(order.amount)
+  const orderAmount = asNumber(order.amount)
   const baseAmount = order.side === 'buy'
     ? order.receive === undefined
-      ? (quoteAmount - Math.max(fee - creditedFee, 0)) / price
+      ? (orderAmount - Math.max(fee - creditedFee, 0)) / price
       : asNumber(order.receive)
-    : quoteAmount
+    : orderAmount
+  const quoteAmount = order.side === 'buy' ? orderAmount : baseAmount * price
 
   if (!Number.isFinite(baseAmount) || baseAmount < 0 || price <= 0) {
     throw new Error(`Invalid Bitkub order quantities for ${order.txn_id}`)
@@ -191,9 +196,10 @@ export const mapBitkubOrder = (order: BitkubOrder, quoteAsset: string, raw: unkn
     id: order.txn_id,
     side: order.side,
     baseAsset,
-    quoteAsset: quoteAsset.split('_')[1] ?? 'THB',
+    quoteAsset: resolvedQuoteAsset,
     price,
     amount: baseAmount,
+    quoteAmount,
     fee,
     feeAsset: 'THB',
     executedAt: toMilliseconds(order.ts),
@@ -253,13 +259,11 @@ export class BitkubAdapter implements ExchangeAdapter {
     return mapBitkubBalances(payload)
   }
 
-  async fetchTrades(sinceTimestamp?: number, assets?: string[]): Promise<NormalizedTrade[]> {
+  async fetchTrades(sinceTimestamp?: number, _assets?: string[]): Promise<NormalizedTrade[]> {
     const symbols = await this.publicGet<BitkubSymbol[]>('/api/v3/market/symbols')
-    const requestedAssets = assets === undefined ? undefined : new Set(assets.map((asset) => asset.toUpperCase()).filter((asset) => asset !== 'THB'))
-    const tradableSymbols = symbols
-      .filter((symbol) => symbol.source !== 'broker' && symbol.symbol.endsWith('_THB'))
-      .filter((symbol) => requestedAssets === undefined || requestedAssets.has(symbol.symbol.split('_')[0] ?? ''))
-      .map((symbol) => symbol.symbol)
+    const tradableSymbols = [...new Set(symbols
+      .filter((symbol) => symbol.source === 'exchange' && symbol.status === 'active')
+      .map((symbol) => symbol.symbol))]
     const trades: NormalizedTrade[] = []
     let unavailableSymbolCount = 0
 
@@ -294,14 +298,14 @@ export class BitkubAdapter implements ExchangeAdapter {
     return records.map((record) => mapBitkubTransfer(record, 'withdraw', record))
   }
 
-  async fetchFiatDeposits(_sinceTimestamp?: number): Promise<NormalizedFiatTransfer[]> {
+  async fetchFiatDeposits(sinceTimestamp?: number): Promise<NormalizedFiatTransfer[]> {
     const records = await this.fetchFiatTransfers('/api/v4/fiat/deposit/history')
-    return mapBitkubFiatTransfers(records, 'deposit')
+    return mapBitkubFiatTransfers(records, 'deposit').filter((record) => sinceTimestamp === undefined || record.executedAt >= sinceTimestamp)
   }
 
-  async fetchFiatWithdrawals(_sinceTimestamp?: number): Promise<NormalizedFiatTransfer[]> {
+  async fetchFiatWithdrawals(sinceTimestamp?: number): Promise<NormalizedFiatTransfer[]> {
     const records = await this.fetchFiatTransfers('/api/v4/fiat/withdraw/history')
-    return mapBitkubFiatTransfers(records, 'withdraw')
+    return mapBitkubFiatTransfers(records, 'withdraw').filter((record) => sinceTimestamp === undefined || record.executedAt >= sinceTimestamp)
   }
 
   async fetchPrices(): Promise<PriceQuote[]> {
@@ -325,10 +329,14 @@ export class BitkubAdapter implements ExchangeAdapter {
 
   private async fetchOrdersForPair(symbol: string, sinceTimestamp?: number): Promise<NormalizedTrade[]> {
     const orders: NormalizedTrade[] = []
-    let cursor = 'e30='
+    let cursor: string | undefined
+    let pageCount = 0
 
     while (true) {
-      const query = new URLSearchParams({ cursor, lmt: '100', pagination_type: 'keyset', sym: symbol })
+      pageCount += 1
+      if (pageCount > maxPaginationPages) throw new Error('Bitkub order-history pagination exceeded the safety limit')
+      const query = new URLSearchParams({ lmt: '100', pagination_type: 'keyset', sym: symbol })
+      if (cursor !== undefined) query.set('cursor', cursor)
       if (sinceTimestamp) query.set('start', String(sinceTimestamp))
 
       const response = await this.secureGetRaw<BitkubOrder[]>('/api/v3/market/my-order-history', query) as BitkubOrderHistoryEnvelope
@@ -348,11 +356,15 @@ export class BitkubAdapter implements ExchangeAdapter {
     let totalPage = 1
 
     while (page <= totalPage) {
+      if (page > maxPaginationPages) throw new Error('Bitkub crypto-history pagination exceeded the safety limit')
       const query = new URLSearchParams({ limit: '200', page: String(page) })
       if (sinceTimestamp) query.set('created_start', new Date(sinceTimestamp).toISOString())
       const result = await this.secureGet<BitkubPage<BitkubCryptoTransfer>>(path, query)
       records.push(...result.items)
       totalPage = result.total_page
+      if (!Number.isSafeInteger(totalPage) || totalPage < page || totalPage > maxPaginationPages) {
+        throw new Error('Bitkub crypto-history pagination was invalid')
+      }
       page += 1
     }
 
@@ -364,6 +376,7 @@ export class BitkubAdapter implements ExchangeAdapter {
     let page = 1
 
     while (true) {
+      if (page > maxPaginationPages) throw new Error('Bitkub fiat-history pagination exceeded the safety limit')
       const query = new URLSearchParams({ limit: '100', page: String(page) })
       const response = await this.secureGetRaw<BitkubFiatTransfer[]>(path, query)
       const result = resolveEnvelope(response, `${path}${encodeQuery(query)}`)

@@ -22,6 +22,9 @@ CREATE TABLE IF NOT EXISTS balance_snapshots (
 CREATE INDEX IF NOT EXISTS balance_snapshots_account_time_idx
   ON balance_snapshots(account_id, snapshot_at DESC);
 
+CREATE INDEX IF NOT EXISTS balance_snapshots_account_time_asset_idx
+  ON balance_snapshots(account_id, snapshot_at DESC, asset);
+
 CREATE TABLE IF NOT EXISTS trades (
   id TEXT PRIMARY KEY,
   account_id TEXT NOT NULL REFERENCES accounts(id),
@@ -31,6 +34,7 @@ CREATE TABLE IF NOT EXISTS trades (
   quote_asset TEXT NOT NULL,
   price REAL NOT NULL,
   amount REAL NOT NULL,
+  quote_amount REAL,
   fee REAL NOT NULL DEFAULT 0,
   fee_asset TEXT,
   executed_at INTEGER NOT NULL,
@@ -40,8 +44,11 @@ CREATE TABLE IF NOT EXISTS trades (
 CREATE UNIQUE INDEX IF NOT EXISTS trades_account_external_id_idx
   ON trades(account_id, external_id);
 
-CREATE INDEX IF NOT EXISTS trades_account_executed_idx
-  ON trades(account_id, executed_at DESC);
+CREATE INDEX IF NOT EXISTS trades_account_executed_id_idx
+  ON trades(account_id, executed_at DESC, id DESC);
+
+CREATE INDEX IF NOT EXISTS trades_executed_id_idx
+  ON trades(executed_at DESC, id DESC);
 
 CREATE TABLE IF NOT EXISTS crypto_transfers (
   id TEXT PRIMARY KEY,
@@ -59,8 +66,11 @@ CREATE TABLE IF NOT EXISTS crypto_transfers (
 CREATE UNIQUE INDEX IF NOT EXISTS crypto_transfers_account_external_id_idx
   ON crypto_transfers(account_id, external_id);
 
-CREATE INDEX IF NOT EXISTS crypto_transfers_account_executed_idx
-  ON crypto_transfers(account_id, executed_at DESC);
+CREATE INDEX IF NOT EXISTS crypto_transfers_account_executed_id_idx
+  ON crypto_transfers(account_id, executed_at DESC, id DESC);
+
+CREATE INDEX IF NOT EXISTS crypto_transfers_executed_id_idx
+  ON crypto_transfers(executed_at DESC, id DESC);
 
 CREATE TABLE IF NOT EXISTS fiat_transfers (
   id TEXT PRIMARY KEY,
@@ -77,8 +87,11 @@ CREATE TABLE IF NOT EXISTS fiat_transfers (
 CREATE UNIQUE INDEX IF NOT EXISTS fiat_transfers_account_external_id_idx
   ON fiat_transfers(account_id, external_id);
 
-CREATE INDEX IF NOT EXISTS fiat_transfers_account_executed_idx
-  ON fiat_transfers(account_id, executed_at DESC);
+CREATE INDEX IF NOT EXISTS fiat_transfers_account_executed_id_idx
+  ON fiat_transfers(account_id, executed_at DESC, id DESC);
+
+CREATE INDEX IF NOT EXISTS fiat_transfers_executed_id_idx
+  ON fiat_transfers(executed_at DESC, id DESC);
 
 CREATE TABLE IF NOT EXISTS price_cache (
   asset TEXT NOT NULL,
@@ -99,6 +112,20 @@ CREATE TABLE IF NOT EXISTS price_snapshots (
 CREATE INDEX IF NOT EXISTS price_snapshots_quote_time_idx
   ON price_snapshots(quote, snapshot_at DESC);
 
+CREATE TABLE IF NOT EXISTS portfolio_value_snapshots (
+  account_id TEXT NOT NULL REFERENCES accounts(id),
+  interval INTEGER NOT NULL,
+  snapshot_at INTEGER NOT NULL,
+  total_value REAL NOT NULL CHECK(total_value >= 0),
+  PRIMARY KEY (account_id, interval)
+);
+
+CREATE INDEX IF NOT EXISTS portfolio_value_snapshots_time_account_idx
+  ON portfolio_value_snapshots(snapshot_at, account_id);
+
+CREATE INDEX IF NOT EXISTS portfolio_value_snapshots_account_time_idx
+  ON portfolio_value_snapshots(account_id, snapshot_at);
+
 CREATE TABLE IF NOT EXISTS sync_state (
   account_id TEXT NOT NULL REFERENCES accounts(id),
   data_type TEXT NOT NULL,
@@ -118,6 +145,9 @@ CREATE TABLE IF NOT EXISTS sync_events (
 
 CREATE INDEX IF NOT EXISTS sync_events_account_type_time_idx
   ON sync_events(account_id, data_type, occurred_at DESC);
+
+CREATE INDEX IF NOT EXISTS sync_events_latest_idx
+  ON sync_events(account_id, data_type, occurred_at DESC, id DESC);
 
 CREATE TABLE IF NOT EXISTS push_subscriptions (
   endpoint TEXT PRIMARY KEY,
@@ -173,3 +203,11 @@ CREATE TABLE IF NOT EXISTS allocation_targets (
   target_percent REAL NOT NULL CHECK(target_percent > 0 AND target_percent <= 100),
   updated_at INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS aws_ingestion_nonces (
+  nonce TEXT PRIMARY KEY,
+  expires_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS aws_ingestion_nonces_expires_at_idx
+  ON aws_ingestion_nonces(expires_at);

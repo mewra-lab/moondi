@@ -115,6 +115,8 @@ gated by Cloudflare Access.
      `fiat_transfers`, update `sync_state`.
    - Also refresh `price_cache` (Bitkub's public ticker endpoint is
      sufficient for Bitkub-only assets).
+   - Materialize one complete portfolio value per account and 30-minute interval
+     during ingestion so chart reads do not repeatedly aggregate raw snapshots.
    - Add basic error handling + logging (don't let one account's failure
      block others).
 6. Manually insert one row into `accounts` for your Bitkub account (via
@@ -151,6 +153,23 @@ read-only manual sync are permitted. Manual sync must use an internal binding,
 be rate-limited, and share an execution lock with cron. None of these features
 may imply invested capital, P&L, trading, or withdrawals.
 
+Current egress exception: Bitkub accepted the documented read-only balance
+request three consecutive times from an isolated AWS Lambda POC but returned
+`401 A1000-MK` from Cloudflare Worker egress using the same credentials and
+signing inputs. A dedicated AWS Lambda may therefore perform that secure Bitkub
+read and send only bounded, normalized records to an API Worker ingestion route.
+That route must remain covered by Cloudflare Access via a Service Auth policy,
+and independently verify a distinct HMAC secret, timestamp window, and
+single-use D1-backed nonce. It must never accept raw exchange payloads or give
+AWS direct D1/Cloudflare credentials. Balance and history ingestion were smoke
+tested with the read-only key on 2026-09-02. History must follow every documented
+page/cursor and be delivered in bounded, idempotent chunks; only a final complete
+chunk may advance its checkpoint. Provider retention still prevents assuming
+that the available window is complete lifetime history, so Phase 2 P&L remains
+blocked pending a verified cost-basis source for older activity. Migration 0013
+clears only the three history checkpoints once so installs affected by the
+earlier partial scan replay the provider's still-available window safely.
+
 A target-difference view may calculate current percentage and estimated THB
 distance from existing allocation targets in the browser. It must remain a
 read-only comparison: do not add trade amounts, transaction instructions,
@@ -186,11 +205,10 @@ does not create, modify, delete, or expose an exchange credential.
 2. Wire it into `GET /api/portfolio` — add `investedAmount`,
    `realizedPnl`, `unrealizedPnl`, `totalPnl`, per-asset `avgCost`, to the
    response.
-3. Add `GET /api/history/value` backed by `balance_snapshots` × historical
-   `price_cache` (store a timestamped price history table if you need true
-   historical pricing — Bitkub's ticker/candle endpoints can backfill this;
-   otherwise approximate using price at each snapshot time going forward
-   only).
+3. Add `GET /api/history/value` backed by precomputed
+   `portfolio_value_snapshots`. Build each value from a complete balance snapshot
+   and a bounded matching price set at ingestion; retain timestamped prices for
+   asset charts and one-time historical backfill only.
 4. Add a manual "cost basis override" field for crypto that arrived via
    `crypto_transfers` (direction = deposit) with no matching trade — a
    simple form + a nullable `manual_cost_basis` column keyed by transfer id,

@@ -64,9 +64,11 @@ key in Bitkub, replace that account's entry in the complete Worker-side
 
 ### Portfolio-value history
 
-The history chart values each recorded balance snapshot with a price snapshot
-from the same sync. If a non-THB asset has no matching price, Moondi excludes
-that chart point. Showing only the THB portion would falsely look like a loss.
+The history chart values each recorded balance snapshot with prices no more
+than 35 minutes from that balance. Balance and public-price jobs may arrive in
+either order; each attempts to materialize the latest complete snapshot. If a
+non-THB asset has no matching price, Moondi excludes that chart point. Showing
+only the THB portion would falsely look like a loss.
 
 Consequences:
 
@@ -84,8 +86,10 @@ market-price movement, not a change in the amount held. The label says
 
 ### Activity and notifications
 
-When Bitkub authorizes the required history endpoints, Moondi stores normalized
-trades and transfers and can show them in the Activity view. Push notifications
+The AWS secure-sync path has verified the required Bitkub history endpoints and
+stores normalized trades and transfers for the Activity view. It scans every
+active exchange symbol, including non-THB pairs, follows all available pages,
+and checkpoints only after the final ingestion chunk. Push notifications
 are generated from newly synchronized records, price-target crossings, and
 sync-state changes; duplicate events are suppressed by the stored sync state.
 Notification preferences are stored per subscribed browser for trades, crypto
@@ -97,19 +101,19 @@ rate-limited Worker-delivery test sends a fixed message to the current
 subscription, verifying Worker → push service → device without waiting for a
 Bitkub event.
 
-Trade polling covers assets held now or observed in an earlier positive balance
-snapshot, so selling an observed position to zero does not stop its later
-history updates. Bitkub requires an individual symbol for each order-history
-request and retains only a bounded history window; a position bought and fully
-sold between snapshots or activity older than the provider window may still be
-unavailable. This is one reason cost basis and P&L remain disabled.
+Bitkub requires an individual symbol for each order-history request and retains
+only a bounded history window. The secure sync therefore polls every active
+exchange symbol rather than inferring symbols from current holdings. Activity
+older than the provider window may still be unavailable, which is why cost
+basis and P&L remain disabled.
 
-### Manual sync, account scopes, and backup
+### Account scopes and backup
 
-**Sync now** sends a request from the API Worker to the Sync Worker through a
-private service binding. It is not a browser-to-Bitkub request. A 15-minute
-global cooldown and a D1 execution lock prevent repeated or overlapping syncs,
-including overlap with the cron schedule.
+The dashboard has no manual-sync control. Scheduled refresh ownership remains
+unambiguous: EventBridge runs private Bitkub ingestion in AWS mode and the Sync
+Worker cron records public prices. The internal default-mode trigger retains a
+cooldown and execution lock for controlled operational use, but is not exposed
+as a UI feature.
 
 The account selector scopes holdings, activity, value history, and sync health
 to one connected account when more than one exists. Watchlist assets, price

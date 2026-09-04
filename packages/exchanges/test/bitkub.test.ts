@@ -27,6 +27,17 @@ describe('Bitkub mapping', () => {
     })
   })
 
+  it('keeps sell quantities in base units and derives the quote amount', () => {
+    expect(mapBitkubOrder({ amount: '0.5', fee: '0.1', rate: '60000', side: 'sell', ts: 1_700_000_000_000, txn_id: 'trade-sell' }, 'BTC_USDT', { source: 'fixture' })).toMatchObject({
+      amount: 0.5,
+      baseAsset: 'BTC',
+      price: 60000,
+      quoteAmount: 30000,
+      quoteAsset: 'USDT',
+      side: 'sell',
+    })
+  })
+
   it('maps crypto and fiat transfers', () => {
     expect(mapBitkubTransfer({ amount: '2', created_at: '2026-08-01T00:00:00.000Z', hash: 'hash-1', symbol: 'ETH' }, 'deposit', { source: 'fixture' })).toMatchObject({
       amount: 2,
@@ -146,8 +157,15 @@ describe('Bitkub mapping', () => {
 
   it('uses documented keyset order-history pagination', async () => {
     const responses = [
-      Response.json({ error: 0, result: [{ source: 'exchange', symbol: 'BTC_THB' }, { source: 'broker', symbol: 'BROKER_THB' }] }),
+      Response.json({ error: 0, result: [
+        { source: 'exchange', status: 'active', symbol: 'BTC_THB' },
+        { source: 'exchange', status: 'active', symbol: 'BTC_USDT' },
+        { source: 'exchange', status: 'inactive', symbol: 'OLD_THB' },
+        { source: 'broker', status: 'active', symbol: 'BROKER_THB' },
+      ] }),
       Response.json(1_700_000_000_000),
+      Response.json(1_700_000_000_001),
+      Response.json({ error: 0, pagination: { cursor: 'unused', has_next: false }, result: [] }),
       Response.json({ error: 0, pagination: { cursor: 'unused', has_next: false }, result: [] }),
     ]
     const requests: string[] = []
@@ -164,14 +182,16 @@ describe('Bitkub mapping', () => {
     if (!historyUrl) throw new Error('order-history request was not sent')
     const query = new URL(historyUrl).searchParams
     expect(query.get('lmt')).toBe('100')
-    expect(query.get('cursor')).toBe('e30=')
+    expect(query.has('cursor')).toBe(false)
     expect(query.get('pagination_type')).toBe('keyset')
     expect(query.get('sym')).toBe('BTC_THB')
+    expect(requests.some((request) => request.includes('sym=BTC_USDT'))).toBe(true)
+    expect(requests.some((request) => request.includes('sym=OLD_THB'))).toBe(false)
   })
 
   it('follows the next keyset cursor exactly once', async () => {
     const responses = [
-      Response.json({ error: 0, result: [{ source: 'exchange', symbol: 'BTC_THB' }] }),
+      Response.json({ error: 0, result: [{ source: 'exchange', status: 'active', symbol: 'BTC_THB' }] }),
       Response.json(1_700_000_000_000),
       Response.json({ error: 0, pagination: { cursor: 'cursor-2', has_next: true }, result: [{ amount: '1000', credit: '0', fee: '25', rate: '100000', side: 'buy', ts: 1_700_000_000_000, txn_id: 'trade-1' }] }),
       Response.json(1_700_000_000_001),
@@ -188,13 +208,13 @@ describe('Bitkub mapping', () => {
 
     await expect(adapter.fetchTrades()).resolves.toHaveLength(1)
     const historyRequests = requests.filter((request) => request.includes('/api/v3/market/my-order-history'))
-    expect(new URL(historyRequests[0] ?? '').searchParams.get('cursor')).toBe('e30=')
+    expect(new URL(historyRequests[0] ?? '').searchParams.has('cursor')).toBe(false)
     expect(new URL(historyRequests[1] ?? '').searchParams.get('cursor')).toBe('cursor-2')
   })
 
   it('continues when Bitkub returns application error 81 for a symbol', async () => {
     const responses = [
-      Response.json({ error: 0, result: [{ source: 'exchange', symbol: 'BTC_THB' }] }),
+      Response.json({ error: 0, result: [{ source: 'exchange', status: 'active', symbol: 'BTC_THB' }] }),
       Response.json(1_700_000_000_000),
       Response.json({ error: 81 }),
       Response.json(1_700_000_000_001),
@@ -212,7 +232,7 @@ describe('Bitkub mapping', () => {
 
   it('uses the documented trading symbol for order history', async () => {
     const responses = [
-      Response.json({ error: 0, result: [{ source: 'exchange', symbol: 'BTC_THB' }] }),
+      Response.json({ error: 0, result: [{ source: 'exchange', status: 'active', symbol: 'BTC_THB' }] }),
       Response.json(1_700_000_000_000),
       Response.json({ error: 0, pagination: { next: null }, result: [] }),
     ]

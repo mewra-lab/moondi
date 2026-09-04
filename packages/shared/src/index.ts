@@ -13,6 +13,7 @@ export type NormalizedTrade = {
   quoteAsset: string
   price: number
   amount: number
+  quoteAmount?: number
   fee: number
   feeAsset?: string
   executedAt: number
@@ -45,6 +46,30 @@ export type PriceQuote = {
   quote: string
   price: number
   updatedAt: number
+}
+
+export const portfolioValueAt = (
+  balances: NormalizedBalance[],
+  prices: PriceQuote[],
+  snapshotAt: number,
+  priceToleranceMs: number,
+): number | undefined => {
+  const thbPrices = new Map(
+    prices
+      .filter((price) => price.quote === 'THB' && Math.abs(price.updatedAt - snapshotAt) <= priceToleranceMs)
+      .map((price) => [price.asset, price.price]),
+  )
+
+  let total = 0
+  for (const balance of balances) {
+    const amount = balance.available + balance.reserved
+    if (amount === 0) continue
+    const price = balance.asset === 'THB' ? 1 : thbPrices.get(balance.asset)
+    if (price === undefined || !Number.isFinite(price) || price <= 0) return undefined
+    total += amount * price
+  }
+
+  return Number.isFinite(total) && total >= 0 ? total : undefined
 }
 
 export type ExchangeAdapter = {

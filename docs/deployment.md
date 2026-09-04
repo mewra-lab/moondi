@@ -12,8 +12,9 @@ Create these resources in the target Cloudflare account:
 | --- | --- | --- |
 | D1 database | API + sync Worker | Stores normalized balances, prices, activity, sync events, and push subscriptions. |
 | KV namespace | API + sync Worker | Cache/transient application state. |
-| API Worker | Browser API | Receives normalized, authenticated dashboard requests. |
-| Sync Worker | Cron | Holds Bitkub secrets and makes read-only exchange requests. |
+| API Worker | Browser API + AWS ingestion | Receives normalized dashboard requests and AWS-originated Bitkub snapshots and activity. |
+| Sync Worker | Cron | Refreshes public Bitkub prices; it can optionally own signed Bitkub syncs during the legacy mode. |
+| AWS Lambda + EventBridge Scheduler | Private Bitkub sync | Optional secure egress for signed Bitkub balance requests when Bitkub rejects Cloudflare egress. |
 | Pages project | Browser PWA | Hosts the static React application. |
 | Cloudflare Access apps | Pages + API | Private Google-gated access. |
 
@@ -64,6 +65,7 @@ correct Worker/config in your installation.
 | `VAPID_PRIVATE_KEY` | Sync | Browser push signing secret. |
 | `VAPID_SUBJECT` | Sync | Contact URI for Web Push. |
 | `INTERNAL_PUSH_TEST_TOKEN` | API and Sync | Same random value in both Workers; authenticates private Worker-to-Worker push tests and manual-sync requests. |
+| `AWS_SYNC_INGESTION_SECRET` | API | Shared only with the AWS sync Lambda; signs normalized Bitkub ingestion. |
 
 Example pattern:
 
@@ -91,6 +93,142 @@ first; only after that
 succeeds does the wizard create the new active D1 row. This ordering prevents a
 cancelled or invalid setup from interrupting the existing account. The map is
 never saved to a file.
+
+## AWS Bitkub secure sync
+
+Use this path only when direct signed Bitkub requests from the Cloudflare Sync
+Worker are rejected but the same read-only key succeeds from AWS. It moves the
+private exchange request—not the database or browser API—to Lambda:
+
+`EventBridge Scheduler → private Lambda → Bitkub → Cloudflare Access → API Worker → D1`.
+
+The Lambda source is [infra/aws-bitkub-sync/lambda_function.py](../infra/aws-bitkub-sync/lambda_function.py). It fetches balances, trade history, crypto transfers, and fiat transfers. Before each run it reads D1 checkpoints through an authenticated internal API route; it sends only normalized records back to the API and never sends raw Bitkub payloads or direct D1 credentials. Trade records include the base quantity, quote asset, unit price, fee, and quote amount. Bitkub reports `amount` in quote units for buys and base units for sells, so the adapter normalizes those cases before ingestion.
+
+Order-history discovery scans every active `source=exchange` symbol returned by
+Bitkub, including non-THB pairs such as `BTC_USDT`, and follows keyset cursors to
+completion. History is sent in chunks of at most 250 records and below the API
+body limit. Only the final chunk advances the checkpoint, so a failed partial
+delivery is safe to retry. Keep the 120-second Lambda timeout and review the
+first complete CloudWatch result before relying on the schedule.
+
+For an existing AWS deployment, pause the EventBridge schedule during this
+protocol upgrade. Apply migrations, deploy the API Worker that understands the
+`complete` marker, update the Lambda, run one manual test, and only then resume
+the schedule. Never run the chunking Lambda against the older API because that
+API could advance a checkpoint after an intermediate chunk.
+
+### 1. Prepare Cloudflare
+
+1. Apply every pending migration through `0013_rescan_exchange_history.sql`
+   using the migration command above.
+2. Set an `AWS_SYNC_INGESTION_SECRET` secret on the **API Worker**. Generate one
+   random value in a password manager, paste the same value into AWS Parameter
+   Store in the next section, then clear the clipboard. Never commit, log, or
+   place it in `wrangler.jsonc`.
+3. In the Cloudflare Access application for the exact API hostname, create a
+   **Service token** named for this Lambda. Copy its client ID and one-time
+   client secret directly into AWS SecureString parameters. Add an Access policy
+   with action **Service Auth** that includes only that token. Keep the existing
+   email allow-list policy for browser users.
+4. Confirm the API route is protected by Access. Do not create an Access bypass
+   for `/internal/aws-sync/` and do not create a public Lambda Function URL.
+
+### 2. Create AWS parameters and execution role
+
+In `ap-southeast-1`, create these **Standard SecureString** parameters (all
+encrypted with your chosen KMS key):
+
+| Parameter name | Value source |
+| --- | --- |
+| `/moondi/aws-sync/bitkub/api-key` | existing read-only Bitkub API key |
+| `/moondi/aws-sync/bitkub/api-secret` | matching Bitkub secret |
+| `/moondi/aws-sync/cloudflare/access-client-id` | Cloudflare service-token client ID |
+| `/moondi/aws-sync/cloudflare/access-client-secret` | Cloudflare service-token client secret |
+| `/moondi/aws-sync/ingestion-secret` | exact same value as API `AWS_SYNC_INGESTION_SECRET` |
+
+Give a new Lambda execution role `AWSLambdaBasicExecutionRole` plus an inline
+least-privilege policy. Replace the account ID and KMS key ARN, but keep the
+parameter names exact:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": "ssm:GetParameter",
+      "Resource": [
+        "arn:aws:ssm:ap-southeast-1:<account-id>:parameter/moondi/aws-sync/bitkub/api-key",
+        "arn:aws:ssm:ap-southeast-1:<account-id>:parameter/moondi/aws-sync/bitkub/api-secret",
+        "arn:aws:ssm:ap-southeast-1:<account-id>:parameter/moondi/aws-sync/cloudflare/access-client-id",
+        "arn:aws:ssm:ap-southeast-1:<account-id>:parameter/moondi/aws-sync/cloudflare/access-client-secret",
+        "arn:aws:ssm:ap-southeast-1:<account-id>:parameter/moondi/aws-sync/ingestion-secret"
+      ]
+    },
+    {
+      "Effect": "Allow",
+      "Action": "kms:Decrypt",
+      "Resource": "<your-kms-key-arn>",
+      "Condition": {
+        "StringEquals": { "kms:ViaService": "ssm.ap-southeast-1.amazonaws.com" }
+      }
+    }
+  ]
+}
+```
+
+If the parameters use the AWS-managed `alias/aws/ssm` key, follow your
+account's SSM access model instead of adding a customer-key ARN that does not
+match. Do not give this role D1, Cloudflare, IAM, or general SSM permissions.
+
+### 3. Deploy and prove the Lambda before scheduling it
+
+Create a separate Lambda named `moondi-bitkub-sync` with Python 3.14, arm64 or
+x86_64, 128 MB memory, 120-second timeout, **no VPC**, no function URL, and the
+execution role above. Paste the tracked `lambda_function.py` source and set its
+handler to `lambda_function.lambda_handler`.
+
+Set these non-secret environment variables:
+
+| Name | Value |
+| --- | --- |
+| `BITKUB_API_KEY_PARAMETER` | `/moondi/aws-sync/bitkub/api-key` |
+| `BITKUB_API_SECRET_PARAMETER` | `/moondi/aws-sync/bitkub/api-secret` |
+| `CF_ACCESS_CLIENT_ID_PARAMETER` | `/moondi/aws-sync/cloudflare/access-client-id` |
+| `CF_ACCESS_CLIENT_SECRET_PARAMETER` | `/moondi/aws-sync/cloudflare/access-client-secret` |
+| `AWS_INGESTION_SECRET_PARAMETER` | `/moondi/aws-sync/ingestion-secret` |
+| `MOONDI_ACCOUNT_ID` | the exact active D1 account ID, for example `bitkub-main` |
+| `MOONDI_INGESTION_URL` | `https://<your-api-host>/internal/aws-sync/bitkub/balances` |
+
+Run one manual Lambda test with `{}`. It should return `{ "ok": true }`, log
+only record counts, and create new balance/activity records plus corresponding
+sync events in the dashboard. A `401`, `403`, or `404` from the
+ingestion URL means the Access service-token policy or shared ingestion secret
+is not configured correctly; do not weaken Access to diagnose it.
+
+Only after that test succeeds, create an EventBridge Scheduler schedule of
+`rate(30 minutes)` targeting this Lambda. Disable the flexible time window and
+keep retry attempts bounded. If the account concurrency quota permits it, set
+the function's reserved concurrency to `1` to avoid overlapping Bitkub syncs;
+otherwise retain unreserved concurrency because AWS requires at least 100
+unreserved executions before it permits a reservation. Add an AWS cost budget
+alert even when using a free tier.
+
+### 4. Cut over from Cloudflare private sync
+
+After the manual Lambda test and one scheduled run both succeed, set
+`BITKUB_SECURE_SYNC_MODE` to `aws-ingest` in **both** API and Sync Worker
+`vars`, then deploy those two Workers. In this mode:
+
+- Lambda owns every signed Bitkub request (balances and activity history);
+- the Sync Worker keeps only public price refreshes;
+- the dashboard has no **Sync now** control because EventBridge owns the
+  private refresh schedule; and
+- existing Cloudflare Bitkub credentials can be removed only after verifying
+  that the AWS schedule remains healthy.
+
+Do not switch this mode before Lambda ingestion is verified: otherwise no
+component will be responsible for new private balance snapshots.
 
 ## Deploy order
 
@@ -148,14 +286,17 @@ form-encoded `POST` routes for watchlists, allocation targets, and price alerts.
   without Access cookies; neither may return the dashboard directly.
 - Sign into the Pages app through Access with an allowed account.
 - Confirm the dashboard loads and no secret appears in browser network data.
-- Confirm the sync Worker has a scheduled trigger.
+- Confirm the sync Worker has a scheduled trigger. In AWS secure-sync mode,
+  also confirm the private EventBridge schedule exists and Lambda has no public
+  trigger.
 - Inspect Worker logs after one cron run; use redacted error messages only.
-- Check Sync health for balances and prices.
+- Check Sync health for balances, prices, trades, crypto transfers, and fiat transfers.
 - Enable notifications in a supported browser. Test both device display and
   Worker delivery; the latter confirms Worker → push service → device without
   waiting for a Bitkub event.
-- Use **Sync now** once. Confirm it acknowledges the request, is rate limited
-  for 15 minutes, and that a new balance/price sync event appears after it finishes.
+- In AWS secure-sync mode, wait for EventBridge and confirm that its next
+  invocation creates fresh balance and activity data; confirm the Sync Worker
+  cron independently creates fresh public prices.
 - For each additional Bitkub account, confirm the account selector can show its
   own balances, sync health names the correct account, and the combined scope
   equals the sum of the account scopes.

@@ -89,11 +89,14 @@ exchange request, and does not expose raw provider payloads or credentials.
                             ▲
                             │ writes
                   ┌─────────┴──────────┐
-                  │ Cron Trigger Worker │  runs every N minutes
-                  │  - Bitkub adapter   │  fetches balances + trade/
-                  │  - Binance adapter  │  deposit/withdraw history,
-                  │  (later)            │  upserts into D1
+                  │ Cron Trigger Worker │  refreshes public prices and
+                  │  - Binance adapter  │  supported exchange work
                   └─────────────────────┘
+
+      AWS EventBridge Scheduler → dedicated AWS Lambda → Bitkub
+                                        │ normalized, signed ingestion
+                                        ▼
+                              protected API Worker → D1
 ```
 
 All Cloudflare products used here (Pages, Workers, D1, KV, Cron Triggers,
@@ -111,9 +114,10 @@ tells you where to check.
 | API / business logic | **Cloudflare Workers** (Hono framework) | Free tier req/day is generous; runs at the edge; can call exchange APIs server-side so secrets never reach the browser |
 | Database | **Cloudflare D1** | Free SQLite-compatible, good enough for personal-scale transaction history |
 | Cache / ephemeral state | **Cloudflare KV** | Cache last-known prices and short-lived application state |
-| Scheduled sync | **Cloudflare Cron Triggers** on a Worker | Pull exchange data on a schedule without a user request |
+| Scheduled sync | **Cloudflare Cron Triggers** on a Worker | Refresh public prices and supported exchange work without a user request |
+| Bitkub secure egress | **AWS Lambda + EventBridge Scheduler** | Bitkub accepts the documented read-only request from AWS but rejects the same request from the Cloudflare Worker; Lambda sends only normalized records to the API Worker. |
 | Auth for the main app | **Cloudflare Access** (Zero Trust) with Google as identity provider | Free up to 50 users; blocks the entire app at Cloudflare's edge *before* any request reaches your Worker/Pages — no auth code to write |
-| Secrets (API keys) | **Wrangler secrets** (`wrangler secret put`) | Never stored in D1/KV in plaintext, never sent to the browser |
+| Secrets (API keys) | **Wrangler secrets** (`wrangler secret put`) and AWS Systems Manager Parameter Store `SecureString` | Exchange credentials stay in the executor that calls the exchange; never stored in D1/KV or sent to the browser. |
 
 ---
 
@@ -163,8 +167,9 @@ to a specific exchange — only to the normalized tables.
   implementing, endpoints get deprecated/versioned, e.g. Fiat v3 → v4
   migration).
 - Secure endpoints require HMAC-SHA256 signing of the request (API key,
-  timestamp, method, path, body) with your API secret — **must happen
-  server-side in the Worker**, never in the browser.
+  timestamp, method, path, body) with your API secret — **must happen in a
+  trusted sync backend**, never in the browser. The current Bitkub deployment
+  uses the private AWS Lambda because Bitkub rejects Cloudflare Worker egress.
 - Endpoints of interest (confirm exact current paths in the official docs
   before coding):
   - Wallet balances (available + reserved) per asset.
@@ -204,7 +209,7 @@ CREATE TABLE accounts (
 
 -- Credential pairs are resolved from a Sync Worker secret map by this local ID.
 
--- Point-in-time balance snapshots (cheap to store, powers history charts)
+-- Point-in-time balance snapshots (source data for current holdings)
 CREATE TABLE balance_snapshots (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   account_id TEXT NOT NULL REFERENCES accounts(id),
@@ -212,6 +217,16 @@ CREATE TABLE balance_snapshots (
   available REAL NOT NULL,
   reserved REAL NOT NULL,
   snapshot_at INTEGER NOT NULL
+);
+
+-- One complete, priced value per account and 30-minute interval.
+-- Chart reads use this bounded summary instead of recomputing across raw history.
+CREATE TABLE portfolio_value_snapshots (
+  account_id TEXT NOT NULL REFERENCES accounts(id),
+  interval INTEGER NOT NULL,
+  snapshot_at INTEGER NOT NULL,
+  total_value REAL NOT NULL,
+  PRIMARY KEY (account_id, interval)
 );
 
 -- Normalized trades (buy/sell of crypto against fiat or another crypto)
@@ -223,6 +238,7 @@ CREATE TABLE trades (
   quote_asset TEXT NOT NULL,     -- e.g. THB
   price REAL NOT NULL,
   amount REAL NOT NULL,          -- base asset amount
+  quote_amount REAL,             -- normalized quote amount (reported or deterministically derived)
   fee REAL NOT NULL DEFAULT 0,
   fee_asset TEXT,
   executed_at INTEGER NOT NULL,
@@ -314,7 +330,7 @@ All routes below sit behind Cloudflare Access.
 | GET | `/api/portfolio` | Aggregated balances, value, invested, P&L across accounts |
 | GET | `/api/portfolio/:accountId` | Same, scoped to one account |
 | GET | `/api/transactions?account=&type=&from=&to=&cursor=` | Paginated, filterable transaction feed (trades + transfers, unioned) |
-| GET | `/api/history/value?range=30d` | Time series of portfolio value for a chart (from `balance_snapshots` + historical prices) |
+| GET | `/api/history/value?range=30d` | Time series of portfolio value from precomputed, complete account values |
 
 Cron Worker (not user-facing, triggered by Cron Trigger):
 
@@ -400,14 +416,14 @@ Cron Worker (not user-facing, triggered by Cron Trigger):
   Overview sections are visible; this local presentation preference never
   changes stored portfolio data or sync behavior. The allocation chart is a
   composition of current estimated value, not invested capital or P&L.
-- Portfolio-value history is a valuation series from balance snapshots and
-  matching price snapshots. One sync cycle uses one shared snapshot timestamp
-  for every account and its price set. A combined point is included only when
-  every account active at that time has a complete, priced snapshot; partial
-  account failures are omitted instead of appearing as a portfolio-value drop.
-  Current holdings likewise come from one latest complete snapshot per account,
-  rather than mixing the newest row for each asset. The chart is not invested
-  capital or P&L.
+- Portfolio-value history is a valuation series materialized at ingestion into
+  one row per account and 30-minute interval. Balance and public-price jobs may
+  run independently; either job attempts to materialize the latest complete
+  balance after its counterpart arrives. A value is stored only when every positive non-THB holding
+  has a price within 35 minutes of the balance timestamp. Combined points require
+  every account active at that time, so partial account failures cannot appear as
+  a portfolio-value drop. Current holdings come from one latest complete snapshot
+  per account. The chart is not invested capital or P&L.
 - Cost basis and P&L remain intentionally unimplemented until trade and fiat
   history are complete and independently verified.
 - Bitkub API usage is read-only. No API/UI path for trade or withdrawal action

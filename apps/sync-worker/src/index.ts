@@ -3,6 +3,7 @@ import type { NormalizedBalance, NormalizedFiatTransfer, NormalizedTrade, Normal
 import * as webpush from 'web-push'
 import type { PushSubscription as WebPushSubscription, RequestOptions as WebPushRequestOptions } from 'web-push'
 import { credentialIssue, parseBitkubCredentialSource, resolveBitkubCredentials, scopedExchangeRecordId, type BitkubCredentials } from './account-credentials'
+import { savePortfolioValueSnapshot } from './portfolio-snapshots'
 import { mergeTradeAssets } from './sync-selection'
 
 declare global {
@@ -54,14 +55,16 @@ const readOptionalSecret = (env: Env, name: string): string | undefined => {
   return typeof value === 'string' && value.length > 0 ? value : undefined
 }
 
-const hasInternalAccess = (request: Request, env: Env): boolean => {
+export const hasInternalAccess = async (request: Request, env: Env): Promise<boolean> => {
   const expected = readOptionalSecret(env, 'INTERNAL_PUSH_TEST_TOKEN')
   const provided = request.headers.get('x-moond-internal-token')
   if (!expected || !provided) return false
-  const expectedBytes = new TextEncoder().encode(expected)
-  const providedBytes = new TextEncoder().encode(provided)
-  return expectedBytes.byteLength === providedBytes.byteLength
-    && crypto.subtle.timingSafeEqual(expectedBytes, providedBytes)
+  const encoder = new TextEncoder()
+  const [expectedHash, providedHash] = await Promise.all([
+    crypto.subtle.digest('SHA-256', encoder.encode(expected)),
+    crypto.subtle.digest('SHA-256', encoder.encode(provided)),
+  ])
+  return crypto.subtle.timingSafeEqual(expectedHash, providedHash)
 }
 
 const isPushEndpoint = (value: unknown): value is string => {
@@ -80,9 +83,13 @@ const readLastSyncedAt = async (db: D1Database, accountId: string, dataType: str
 
 const readPreviouslyHeldAssets = async (db: D1Database, accountId: string): Promise<string[]> => {
   const result = await db.prepare(`
-    SELECT DISTINCT asset FROM balance_snapshots
-    WHERE account_id = ? AND asset != 'THB' AND (available > 0 OR reserved > 0)
-  `).bind(accountId).all<{ asset: string }>()
+    SELECT asset
+    FROM balance_snapshots
+    WHERE account_id = ?
+      AND snapshot_at = (SELECT MAX(snapshot_at) FROM balance_snapshots WHERE account_id = ?)
+      AND asset != 'THB'
+      AND (available > 0 OR reserved > 0)
+  `).bind(accountId, accountId).all<{ asset: string }>()
   return result.results.map((row) => row.asset)
 }
 
@@ -92,7 +99,7 @@ const saveState = async (db: D1Database, accountId: string, dataType: string, ti
       INSERT INTO sync_state (account_id, data_type, last_synced_at)
       VALUES (?, ?, ?)
       ON CONFLICT(account_id, data_type)
-      DO UPDATE SET last_synced_at = excluded.last_synced_at
+      DO UPDATE SET last_synced_at = MAX(sync_state.last_synced_at, excluded.last_synced_at)
     `)
     .bind(accountId, dataType, timestamp)
     .run()
@@ -115,11 +122,11 @@ const saveTrades = async (db: D1Database, accountId: string, trades: NormalizedT
     trades.map((trade) =>
       db
         .prepare(`
-          INSERT INTO trades (id, account_id, external_id, side, base_asset, quote_asset, price, amount, fee, fee_asset, executed_at, raw_json)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          INSERT INTO trades (id, account_id, external_id, side, base_asset, quote_asset, price, amount, quote_amount, fee, fee_asset, executed_at, raw_json)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(account_id, external_id) DO NOTHING
         `)
-        .bind(scopedExchangeRecordId(accountId, trade.id), accountId, trade.id, trade.side, trade.baseAsset, trade.quoteAsset, trade.price, trade.amount, trade.fee, trade.feeAsset ?? null, trade.executedAt, JSON.stringify(trade.raw)),
+        .bind(scopedExchangeRecordId(accountId, trade.id), accountId, trade.id, trade.side, trade.baseAsset, trade.quoteAsset, trade.price, trade.amount, trade.quoteAmount ?? null, trade.fee, trade.feeAsset ?? null, trade.executedAt, JSON.stringify(trade.raw)),
     ),
   )
   return trades.filter((_trade, index) => (results[index]?.meta.changes ?? 0) > 0)
@@ -454,13 +461,20 @@ const recordCredentialFailure = async (env: Env, account: Account, detail: strin
   await notifySyncStatus(env, account.id, 'balances', 'failure', detail)
 }
 
-const syncBitkubPrices = async (env: Env, accounts: Account[], credentials: BitkubCredentials, timestamp: number): Promise<void> => {
+const syncBitkubPrices = async (
+  env: Env,
+  accounts: Account[],
+  credentials: BitkubCredentials,
+  timestamp: number,
+  portfolioAccounts: Account[] = accounts,
+): Promise<void> => {
   if (accounts.length === 0) return
   const adapter = new BitkubAdapter(credentials)
 
   try {
     const prices = await adapter.fetchPrices()
     await savePrices(env.DB, prices, timestamp)
+    await Promise.all(portfolioAccounts.map((account) => savePortfolioValueSnapshot(env.DB, account.id, prices)))
     await notifyPriceAlerts(env, prices, timestamp)
     await Promise.all(accounts.map(async (account) => {
       await saveSyncEvent(env.DB, account.id, 'prices', 'success', null, timestamp)
@@ -481,6 +495,12 @@ const sync = async (env: Env): Promise<void> => {
   await pruneInactivePushSubscriptions(env.DB)
   const result = await env.DB.prepare("SELECT id, exchange, label FROM accounts WHERE exchange = 'bitkub' AND archived_at IS NULL").all<Account>()
   const accounts = result.results
+
+  if (readOptionalSecret(env, 'BITKUB_SECURE_SYNC_MODE') === 'aws-ingest') {
+    await syncBitkubPrices(env, accounts, { apiKey: '', apiSecret: '' }, timestamp)
+    return
+  }
+
   const source = parseBitkubCredentialSource(readOptionalSecret(env, 'BITKUB_ACCOUNTS_JSON'))
   const legacyApiKey = readOptionalSecret(env, 'BITKUB_API_KEY')
   const legacyApiSecret = readOptionalSecret(env, 'BITKUB_API_SECRET')
@@ -512,7 +532,10 @@ const sync = async (env: Env): Promise<void> => {
   const priceCredentials = eligible[0]?.credentials
   if (!priceCredentials) return
   try {
-    await syncBitkubPrices(env, eligible.map(({ account }) => account), priceCredentials, timestamp)
+    const successfulAccounts = eligible
+      .filter((_entry, index) => outcomes[index]?.status === 'fulfilled')
+      .map(({ account }) => account)
+    await syncBitkubPrices(env, eligible.map(({ account }) => account), priceCredentials, timestamp, successfulAccounts)
   } catch (error) {
     console.error(JSON.stringify({ error: readError(error), message: 'Bitkub price sync failed' }))
   }
@@ -543,7 +566,7 @@ export default {
   async fetch(request, env, ctx): Promise<Response> {
     const url = new URL(request.url)
     if (request.method === 'POST' && url.pathname === '/internal/push/test') {
-      if (!hasInternalAccess(request, env)) return Response.json({ error: 'Not found' }, { status: 404 })
+      if (!await hasInternalAccess(request, env)) return Response.json({ error: 'Not found' }, { status: 404 })
       const body: unknown = await request.json().catch(() => null)
       const endpoint = typeof body === 'object' && body !== null ? Reflect.get(body, 'endpoint') : undefined
       if (!isPushEndpoint(endpoint)) return Response.json({ error: 'Invalid push subscription' }, { status: 400 })
@@ -556,7 +579,7 @@ export default {
       }
     }
     if (request.method === 'POST' && url.pathname === '/internal/sync/trigger') {
-      if (!hasInternalAccess(request, env)) return Response.json({ error: 'Not found' }, { status: 404 })
+      if (!await hasInternalAccess(request, env)) return Response.json({ error: 'Not found' }, { status: 404 })
       const accepted = await startSync(env, ctx)
       return Response.json({ accepted }, { status: accepted ? 202 : 409 })
     }

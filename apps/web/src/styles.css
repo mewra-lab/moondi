@@ -1715,7 +1715,7 @@ input[type='number']::-webkit-outer-spin-button {
   font-family: 'DM Mono', monospace;
   font-size: 0.78rem;
   gap: 16px;
-  grid-template-columns: 1.6fr 1.5fr 1fr 1fr;
+  grid-template-columns: 1.35fr 1.15fr 0.65fr 0.85fr 1fr 1fr;
   padding: 16px 4px;
 }
 
@@ -1726,8 +1726,27 @@ input[type='number']::-webkit-outer-spin-button {
   text-transform: uppercase;
 }
 
-.transaction-kind {
+.transaction-badge {
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  display: inline-block;
+  font-size: 0.64rem;
+  line-height: 1;
+  padding: 5px 7px;
   text-transform: capitalize;
+  white-space: nowrap;
+}
+
+.transaction-badge.trade-buy,
+.transaction-badge.crypto_transfer-deposit,
+.transaction-badge.fiat_transfer-deposit {
+  color: #7bbd8d;
+}
+
+.transaction-badge.trade-sell,
+.transaction-badge.crypto_transfer-withdraw,
+.transaction-badge.fiat_transfer-withdraw {
+  color: #df9562;
 }
 
 .load-more {
@@ -2795,6 +2814,22 @@ input[type='number']::-webkit-outer-spin-button {
     font-size: 0.61rem;
     margin-bottom: 3px;
     text-transform: uppercase;
+  }
+
+  .mobile-transaction-values {
+    color: var(--muted);
+    display: flex;
+    font-family: 'DM Mono', monospace;
+    font-size: 0.64rem;
+    gap: 14px;
+    justify-content: end;
+    margin-top: 10px;
+  }
+
+  .mobile-transaction-values strong {
+    color: var(--ink);
+    font-weight: 500;
+    margin-left: 4px;
   }
 
   .asset-detail {

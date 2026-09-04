@@ -27,6 +27,31 @@ allow-list and the provider's current support guidance for Cloudflare-hosted
 read-only clients. Do not use `0.0.0.0/0` as a casual workaround. See
 [Bitkub setup](bitkub.md).
 
+## Cloudflare Bitkub sync returns `401 A1000-MK`, while the AWS probe succeeds
+
+This is a provider-side authorization result whose `-MK` suffix is not defined
+in Bitkub's public error table. It does not prove an HMAC implementation bug,
+and it is distinct from `403 Invalid X-BTK-IP`. Compare the same read-only key
+from Bruno or the isolated Lambda probe without disclosing credentials. If the
+AWS probe succeeds repeatedly while Cloudflare fails, use the AWS secure-sync
+path in [Deployment](deployment.md#aws-bitkub-secure-sync), or contact Bitkub
+support with the endpoint, timestamp, HTTP status, and error code only.
+
+## AWS Lambda returns `401`, `403`, or `404` while posting a snapshot
+
+Do not create an Access bypass. Confirm all of the following instead:
+
+- `MOONDI_INGESTION_URL` is the exact protected API hostname and route;
+- the Access application's **Service Auth** policy includes the Lambda's exact
+  service token;
+- the Lambda SSM client ID and client secret are the matching pair; and
+- the API Worker secret and `/moondi/aws-sync/ingestion-secret` are the same
+  random value.
+
+The ingestion endpoint deliberately returns `404` for unsigned or invalid
+authentication attempts. A `409 Replay rejected` means a request nonce was
+seen already; invoke Lambda again so it creates a new timestamp and nonce.
+
 ## Activity endpoint is deferred but balances work
 
 Bitkub authorizes endpoints independently. This means balance/prices can be
@@ -40,6 +65,11 @@ If a historical balance snapshot lacks a price for any held crypto, its THB
 cash alone must not be shown as the whole portfolio. Moondi excludes incomplete
 points. A real change in portfolio value can still occur from market prices even
 when asset quantities do not change.
+
+If the latest balance time advances but the line stops, confirm that the public
+price job is still succeeding. Either the balance job or the next price job can
+materialize the point, so execution order should not leave the chart stuck. A
+missing or more-than-35-minute-away price intentionally leaves a gap.
 
 ## A price mini-chart says `Collecting prices`
 
@@ -66,13 +96,13 @@ the message; check the operating-system and browser notification settings.
 Subscriptions can expire or be removed by the browser/provider. That is normal;
 the app refreshes an active subscription when it opens.
 
-## Sync now cannot start
+## A private refresh does not start
 
-If the dashboard says manual sync is not configured, set the same
-`INTERNAL_PUSH_TEST_TOKEN` secret on the API and Sync Workers and deploy both.
-If it says a sync is running, wait for the active cron/manual task to finish. A
-successful request is intentionally rate limited for 15 minutes; it does not
-mean Bitkub history endpoints are authorized.
+The dashboard intentionally has no manual-sync button. In AWS mode, inspect the
+EventBridge target and Lambda result for balances/activity, and inspect the Sync
+Worker cron for prices. The internal default-mode trigger is an operational
+endpoint only; it requires the same `INTERNAL_PUSH_TEST_TOKEN` on both Workers
+and is rate limited to prevent overlapping jobs.
 
 ## Production does not show a new web deployment
 

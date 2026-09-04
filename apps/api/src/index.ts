@@ -1,6 +1,8 @@
 import { Hono, type Context } from 'hono'
 import { cors } from 'hono/cors'
 import { createFactory } from 'hono/factory'
+import { portfolioValueAt, type PriceQuote } from '@moondi/shared'
+import { createAwsBitkubRoutes } from './aws-bitkub-routes'
 
 type HonoEnv = {
   Bindings: Env
@@ -31,6 +33,7 @@ type TransactionRow = {
   asset: string
   amount: number
   quote_asset: string | null
+  quote_amount: number | null
   price: number | null
   fee: number
   executed_at: number
@@ -120,10 +123,41 @@ type AllocationTargetRow = {
   updated_at: number
 }
 
-// Balance and price collection happen in one scheduled sync, but the exchange
-// calls may finish seconds apart. Accept only the closest price in that small
-// window so portfolio history remains a point-in-time value, not a stale quote.
-const portfolioHistoryPriceToleranceMs = 5 * 60 * 1_000
+type AwsBalanceIngestion = {
+  accountId: string
+  balances: Array<{
+    asset: string
+    available: number
+    reserved: number
+  }>
+  snapshotAt: number
+}
+
+type AwsHistoryDataType = 'trades' | 'crypto_transfers' | 'fiat_transfers'
+
+type AwsHistoryIngestion = {
+  accountId: string
+  complete: boolean
+  dataType: AwsHistoryDataType
+  records: Array<Record<string, unknown>>
+  syncAt: number
+}
+
+type AwsAuthenticatedIngestion = {
+  body: string
+  nonce: string
+  timestamp: number
+}
+
+type PriceCacheRow = {
+  asset: string
+  price: number
+  updated_at: number
+}
+
+const portfolioHistoryPriceToleranceMs = 35 * 60 * 1_000
+const valueHistoryCacheSeconds = 5 * 60
+const priceHistoryCacheSeconds = 5 * 60
 
 const defaultPushNotificationPreferences: PushNotificationPreferences = {
   cryptoTransfers: true,
@@ -196,12 +230,6 @@ const getArchivedAccounts = async (db: D1Database): Promise<AccountRow[]> => {
 
 const getHoldings = async (db: D1Database, accountId?: string): Promise<HoldingRow[]> => {
   const query = `
-    WITH latest AS (
-      SELECT account_id, MAX(snapshot_at) AS snapshot_at
-      FROM balance_snapshots
-      ${accountId ? 'WHERE account_id = ?1' : ''}
-      GROUP BY account_id
-    )
     SELECT
       balances.account_id,
       accounts.label AS account_label,
@@ -209,13 +237,17 @@ const getHoldings = async (db: D1Database, accountId?: string): Promise<HoldingR
       balances.available,
       balances.reserved,
       COALESCE(prices.price, CASE balances.asset WHEN 'THB' THEN 1 ELSE 0 END) AS price,
-      latest.snapshot_at AS updated_at
-    FROM latest
-    JOIN balance_snapshots AS balances
-      ON balances.account_id = latest.account_id
-      AND balances.snapshot_at = latest.snapshot_at
-    JOIN accounts ON accounts.id = balances.account_id AND accounts.archived_at IS NULL
+      balances.snapshot_at AS updated_at
+    FROM accounts
+    CROSS JOIN balance_snapshots AS balances
+      ON balances.account_id = accounts.id
+      AND balances.snapshot_at = (
+        SELECT MAX(candidate.snapshot_at)
+        FROM balance_snapshots AS candidate
+        WHERE candidate.account_id = accounts.id
+      )
     LEFT JOIN price_cache AS prices ON prices.asset = balances.asset AND prices.quote = 'THB'
+    WHERE accounts.archived_at IS NULL ${accountId ? 'AND accounts.id = ?1' : ''}
     ORDER BY account_label, balances.asset
   `
   const statement = accountId ? db.prepare(query).bind(accountId) : db.prepare(query)
@@ -230,69 +262,45 @@ const getValueHistory = async (db: D1Database, from: number, to: number, account
       FROM accounts
       WHERE archived_at IS NULL ${accountId ? 'AND id = ?3' : ''}
     ),
-    interval_account_snapshots AS (
-      SELECT
-        account_id,
-        snapshot_at / 1800000 AS interval,
-        MAX(snapshot_at) AS snapshot_at
-      FROM balance_snapshots
-      WHERE snapshot_at >= ?1 AND snapshot_at <= ?2
-        AND account_id IN (SELECT id FROM scoped_accounts)
-      GROUP BY account_id, interval
-    ),
-    interval_account_values AS (
-      SELECT
-        snapshots.interval,
-        snapshots.account_id,
-        snapshots.snapshot_at,
-        SUM((balances.available + balances.reserved) * COALESCE(prices.price, CASE balances.asset WHEN 'THB' THEN 1 ELSE 0 END)) AS total_value,
-        SUM(CASE
-          WHEN balances.asset != 'THB'
-            AND balances.available + balances.reserved > 0
-            AND prices.price IS NULL
-          THEN 1
-          ELSE 0
-        END) AS unpriced_assets
-      FROM interval_account_snapshots AS snapshots
-      JOIN balance_snapshots AS balances
-        ON balances.account_id = snapshots.account_id
-        AND balances.snapshot_at = snapshots.snapshot_at
-      LEFT JOIN price_snapshots AS prices
-        ON prices.asset = balances.asset
-        AND prices.quote = 'THB'
-        AND prices.snapshot_at = (
-          SELECT candidate.snapshot_at
-          FROM price_snapshots AS candidate
-          WHERE candidate.asset = balances.asset
-            AND candidate.quote = 'THB'
-            AND candidate.snapshot_at BETWEEN snapshots.snapshot_at - ${portfolioHistoryPriceToleranceMs}
-              AND snapshots.snapshot_at + ${portfolioHistoryPriceToleranceMs}
-          ORDER BY ABS(candidate.snapshot_at - snapshots.snapshot_at), candidate.snapshot_at DESC
-          LIMIT 1
-        )
-      GROUP BY snapshots.interval, snapshots.account_id, snapshots.snapshot_at
-    ),
     interval_portfolio_values AS (
       SELECT
-        interval,
-        MAX(snapshot_at) AS snapshot_at,
-        SUM(total_value) AS total_value,
-        SUM(unpriced_assets) AS unpriced_assets,
-        COUNT(DISTINCT account_id) AS account_count
-      FROM interval_account_values
-      GROUP BY interval
+        values_by_account.interval,
+        MAX(values_by_account.snapshot_at) AS snapshot_at,
+        SUM(values_by_account.total_value) AS total_value,
+        COUNT(*) AS account_count
+      FROM portfolio_value_snapshots AS values_by_account
+      JOIN scoped_accounts ON scoped_accounts.id = values_by_account.account_id
+      WHERE values_by_account.snapshot_at >= ?1 AND values_by_account.snapshot_at <= ?2
+      GROUP BY values_by_account.interval
     )
     SELECT snapshot_at, total_value
     FROM interval_portfolio_values AS portfolio
-    WHERE unpriced_assets = 0
-      AND account_count = (
-        SELECT COUNT(*) FROM scoped_accounts
-        WHERE created_at <= portfolio.snapshot_at
-      )
+    WHERE account_count = (
+      SELECT COUNT(*) FROM scoped_accounts
+      WHERE created_at <= portfolio.snapshot_at
+    )
     ORDER BY snapshot_at
   `
   const result = await (accountId ? db.prepare(query).bind(from, to, accountId) : db.prepare(query).bind(from, to)).all<ValueHistoryRow>()
   return result.results
+}
+
+const valueHistoryCacheKey = (from: number, to: number, accountId?: string): string => (
+  `value-history:v3:${accountId ?? 'all'}:${from}:${to}`
+)
+
+const getCachedValueHistory = async (env: Env, from: number, to: number, accountId?: string): Promise<ValueHistoryRow[]> => {
+  const key = valueHistoryCacheKey(from, to, accountId)
+  if (typeof env.CACHE.get === 'function') {
+    const cached = await env.CACHE.get<ValueHistoryRow[]>(key, 'json')
+    if (Array.isArray(cached)) return cached
+  }
+
+  const points = await getValueHistory(env.DB, from, to, accountId)
+  if (typeof env.CACHE.put === 'function') {
+    await env.CACHE.put(key, JSON.stringify(points), { expirationTtl: valueHistoryCacheSeconds })
+  }
+  return points
 }
 
 const priceHistoryInterval = (from: number, to: number): number => {
@@ -307,24 +315,33 @@ const priceHistoryInterval = (from: number, to: number): number => {
 const getPriceHistories = async (db: D1Database, assets: string[], from: number, to: number): Promise<Record<string, PriceHistoryRow[]>> => {
   const interval = priceHistoryInterval(from, to)
   const placeholders = assets.map(() => '?').join(', ')
-  const result = await db.prepare(`
-    WITH intervals AS (
-      SELECT
-        asset,
-        snapshot_at / ? AS interval,
-        MAX(snapshot_at) AS snapshot_at
+  const recentRange = interval === 30 * 60 * 1_000
+  const query = recentRange
+    ? `
+      SELECT asset, snapshot_at, price
       FROM price_snapshots
       WHERE asset IN (${placeholders}) AND quote = 'THB' AND snapshot_at >= ? AND snapshot_at <= ?
-      GROUP BY asset, interval
-    )
-    SELECT prices.asset, prices.snapshot_at, prices.price
-    FROM intervals
-    JOIN price_snapshots AS prices
-      ON prices.asset = intervals.asset
-      AND prices.quote = 'THB'
-      AND prices.snapshot_at = intervals.snapshot_at
-    ORDER BY prices.asset, prices.snapshot_at
-  `).bind(interval, ...assets, from, to).all<AssetPriceHistoryRow>()
+      ORDER BY asset, snapshot_at
+    `
+    : `
+      SELECT asset, snapshot_at, price
+      FROM (
+        SELECT
+          asset,
+          snapshot_at,
+          price,
+          ROW_NUMBER() OVER (
+            PARTITION BY asset, snapshot_at / ?
+            ORDER BY snapshot_at DESC
+          ) AS sample_rank
+        FROM price_snapshots
+        WHERE asset IN (${placeholders}) AND quote = 'THB' AND snapshot_at >= ? AND snapshot_at <= ?
+      )
+      WHERE sample_rank = 1
+      ORDER BY asset, snapshot_at
+    `
+  const bindings = recentRange ? [...assets, from, to] : [interval, ...assets, from, to]
+  const result = await db.prepare(query).bind(...bindings).all<AssetPriceHistoryRow>()
   return result.results.reduce<Record<string, PriceHistoryRow[]>>((histories, point) => {
     const points = histories[point.asset] ?? []
     points.push({ price: point.price, snapshot_at: point.snapshot_at })
@@ -333,18 +350,37 @@ const getPriceHistories = async (db: D1Database, assets: string[], from: number,
   }, {})
 }
 
-const getPriceHistory = async (db: D1Database, asset: string, from: number, to: number): Promise<PriceHistoryRow[]> => {
-  const histories = await getPriceHistories(db, [asset], from, to)
-  return histories[asset] ?? []
+const sha256Hex = async (value: string): Promise<string> => Array.from(
+  new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value))),
+  (byte) => byte.toString(16).padStart(2, '0'),
+).join('')
+
+const priceHistoryCacheKey = async (assets: string[], from: number, to: number): Promise<string> => {
+  const digest = await sha256Hex(`${[...assets].sort().join(',')}:${from}:${to}`)
+  return `price-history:v3:${digest}:${priceHistoryInterval(from, to)}`
+}
+
+const getCachedPriceHistories = async (env: Env, assets: string[], from: number, to: number): Promise<Record<string, PriceHistoryRow[]>> => {
+  const key = await priceHistoryCacheKey(assets, from, to)
+  if (typeof env.CACHE.get === 'function') {
+    const cached = await env.CACHE.get<Record<string, PriceHistoryRow[]>>(key, 'json')
+    if (cached && typeof cached === 'object') return cached
+  }
+
+  const histories = await getPriceHistories(env.DB, assets, from, to)
+  if (typeof env.CACHE.put === 'function') {
+    await env.CACHE.put(key, JSON.stringify(histories), { expirationTtl: priceHistoryCacheSeconds })
+  }
+  return histories
 }
 
 const historyBounds = (fromQuery: string | undefined, toQuery: string | undefined, daysQuery: string | undefined): { from: number; to: number } => {
-  const now = Date.now()
-  const defaultFrom = now - normalizeDays(daysQuery) * 24 * 60 * 60 * 1_000
+  const currentIntervalEnd = Math.floor(Date.now() / 1_800_000) * 1_800_000 + 1_800_000 - 1
+  const defaultFrom = currentIntervalEnd - normalizeDays(daysQuery) * 24 * 60 * 60 * 1_000 + 1
   const from = normalizeTimestamp(fromQuery) ?? defaultFrom
   const rawTo = normalizeTimestamp(toQuery)
   const dateOnly = typeof toQuery === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(toQuery)
-  const to = rawTo === undefined ? now : rawTo + (dateOnly ? 24 * 60 * 60 * 1_000 - 1 : 0)
+  const to = rawTo === undefined ? currentIntervalEnd : rawTo + (dateOnly ? 24 * 60 * 60 * 1_000 - 1 : 0)
 
   return from <= to ? { from, to } : { from: to, to: from }
 }
@@ -354,22 +390,354 @@ const normalizeAsset = (value: string): string | undefined => {
   return /^[A-Z0-9_-]{1,20}$/.test(asset) ? asset : undefined
 }
 
+const awsIngestionMaxAgeMs = 5 * 60 * 1_000
+const awsIngestionMaxBodyBytes = 512 * 1_024
+const awsIngestionMaxHistoryRecords = 250
+const maxAssetsPerQuery = 96
+
+const verifyAwsIngestion = async (secret: string, timestamp: string, nonce: string, body: string, signature: string): Promise<boolean> => {
+  const signatureBytes = Uint8Array.from(signature.match(/.{2}/g) ?? [], (byte) => Number.parseInt(byte, 16))
+  const key = await crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(secret),
+    { hash: 'SHA-256', name: 'HMAC' },
+    false,
+    ['verify'],
+  )
+  return crypto.subtle.verify('HMAC', key, signatureBytes, new TextEncoder().encode(`${timestamp}\n${nonce}\n${body}`))
+}
+
+const readBoundedBody = async (request: Request, maxBytes: number): Promise<{ body?: string; tooLarge: boolean }> => {
+  const contentLength = request.headers.get('content-length')
+  if (contentLength !== null && Number(contentLength) > maxBytes) return { tooLarge: true }
+  if (!request.body) return { body: '', tooLarge: false }
+
+  const reader = request.body.getReader()
+  const chunks: Uint8Array[] = []
+  let size = 0
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    size += value.byteLength
+    if (size > maxBytes) {
+      await reader.cancel()
+      return { tooLarge: true }
+    }
+    chunks.push(value)
+  }
+
+  const bytes = new Uint8Array(size)
+  let offset = 0
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  try {
+    return { body: new TextDecoder('utf-8', { fatal: true }).decode(bytes), tooLarge: false }
+  } catch {
+    return { tooLarge: false }
+  }
+}
+
+const parseAwsBalanceIngestion = (value: unknown): AwsBalanceIngestion | undefined => {
+  if (typeof value !== 'object' || value === null) return undefined
+
+  const accountId = Reflect.get(value, 'accountId')
+  const snapshotAt = Reflect.get(value, 'snapshotAt')
+  const balances = Reflect.get(value, 'balances')
+  if (
+    typeof accountId !== 'string'
+    || !/^[A-Za-z0-9_-]{1,128}$/.test(accountId)
+    || !Number.isSafeInteger(snapshotAt)
+    || !Array.isArray(balances)
+    || balances.length === 0
+    || balances.length > 250
+  ) return undefined
+
+  const normalizedBalances: AwsBalanceIngestion['balances'] = []
+  for (const balance of balances) {
+    if (typeof balance !== 'object' || balance === null) return undefined
+    const asset = Reflect.get(balance, 'asset')
+    const available = Reflect.get(balance, 'available')
+    const reserved = Reflect.get(balance, 'reserved')
+    if (
+      typeof asset !== 'string'
+      || normalizeAsset(asset) !== asset
+      || typeof available !== 'number'
+      || !Number.isFinite(available)
+      || available < 0
+      || typeof reserved !== 'number'
+      || !Number.isFinite(reserved)
+      || reserved < 0
+    ) return undefined
+    normalizedBalances.push({ asset, available, reserved })
+  }
+
+  return { accountId, balances: normalizedBalances, snapshotAt }
+}
+
+const parseAwsHistoryIngestion = (value: unknown): AwsHistoryIngestion | undefined => {
+  if (typeof value !== 'object' || value === null) return undefined
+
+  const accountId = Reflect.get(value, 'accountId')
+  const complete = Reflect.get(value, 'complete')
+  const dataType = Reflect.get(value, 'dataType')
+  const records = Reflect.get(value, 'records')
+  const syncAt = Reflect.get(value, 'syncAt')
+  if (
+    typeof accountId !== 'string'
+    || !/^[A-Za-z0-9_-]{1,128}$/.test(accountId)
+    || typeof complete !== 'boolean'
+    || (dataType !== 'trades' && dataType !== 'crypto_transfers' && dataType !== 'fiat_transfers')
+    || !Array.isArray(records)
+    || records.length > awsIngestionMaxHistoryRecords
+    || (!complete && records.length === 0)
+    || !Number.isSafeInteger(syncAt)
+    || syncAt <= 0
+  ) return undefined
+
+  const normalizedRecords: Array<Record<string, unknown>> = []
+  for (const record of records) {
+    if (typeof record !== 'object' || record === null || Array.isArray(record)) return undefined
+    normalizedRecords.push(record as Record<string, unknown>)
+  }
+  return { accountId, complete, dataType, records: normalizedRecords, syncAt }
+}
+
+const authenticatedAwsIngestion = async (c: Context<HonoEnv>): Promise<AwsAuthenticatedIngestion | Response> => {
+  const secret = readString(c.env, 'AWS_SYNC_INGESTION_SECRET')
+  const timestampHeader = c.req.header('x-moond-ingest-timestamp')
+  const nonce = c.req.header('x-moond-ingest-nonce')
+  const providedSignature = c.req.header('x-moond-ingest-signature')
+  if (!secret || !timestampHeader || !nonce || !providedSignature) return c.json({ error: 'Not found' }, 404)
+  if (!c.req.header('content-type')?.toLowerCase().startsWith('application/json')) return c.json({ error: 'Not found' }, 404)
+  if (!/^\d{13}$/.test(timestampHeader) || !/^[A-Za-z0-9_-]{16,128}$/.test(nonce) || !/^[a-f0-9]{64}$/.test(providedSignature)) {
+    return c.json({ error: 'Not found' }, 404)
+  }
+
+  const timestamp = Number(timestampHeader)
+  if (!Number.isSafeInteger(timestamp) || Math.abs(Date.now() - timestamp) > awsIngestionMaxAgeMs) return c.json({ error: 'Not found' }, 404)
+
+  const boundedBody = await readBoundedBody(c.req.raw, awsIngestionMaxBodyBytes)
+  if (boundedBody.tooLarge) return c.json({ error: 'Payload too large' }, 413)
+  if (boundedBody.body === undefined) return c.json({ error: 'Invalid ingestion payload' }, 400)
+  const body = boundedBody.body
+  if (!await verifyAwsIngestion(secret, timestampHeader, nonce, body, providedSignature)) return c.json({ error: 'Not found' }, 404)
+
+  return { body, nonce, timestamp }
+}
+
+const claimAwsIngestionNonce = async (db: D1Database, nonce: string, timestamp: number): Promise<boolean> => {
+  const now = Date.now()
+  await db.prepare('DELETE FROM aws_ingestion_nonces WHERE expires_at < ?').bind(now).run()
+  const claim = await db.prepare(`
+    INSERT INTO aws_ingestion_nonces (nonce, expires_at) VALUES (?, ?)
+    ON CONFLICT(nonce) DO NOTHING
+  `).bind(nonce, timestamp + awsIngestionMaxAgeMs).run()
+  return (claim.meta.changes ?? 0) === 1
+}
+
+const getActiveBitkubAccount = async (db: D1Database, accountId: string): Promise<{ id: string } | null> => (
+  db.prepare("SELECT id FROM accounts WHERE id = ? AND exchange = 'bitkub' AND archived_at IS NULL")
+    .bind(accountId)
+    .first<{ id: string }>()
+)
+
+const ingestAwsBalances = async (c: Context<HonoEnv>) => {
+  const authenticated = await authenticatedAwsIngestion(c)
+  if (authenticated instanceof Response) return authenticated
+
+  let parsedBody: unknown
+  try {
+    parsedBody = JSON.parse(authenticated.body) as unknown
+  } catch {
+    return c.json({ error: 'Invalid ingestion payload' }, 400)
+  }
+  const payload = parseAwsBalanceIngestion(parsedBody)
+  if (!payload || Math.abs(payload.snapshotAt - authenticated.timestamp) > awsIngestionMaxAgeMs) return c.json({ error: 'Invalid ingestion payload' }, 400)
+
+  const account = await getActiveBitkubAccount(c.env.DB, payload.accountId)
+  if (!account) return c.json({ error: 'Not found' }, 404)
+  if (!await claimAwsIngestionNonce(c.env.DB, authenticated.nonce, authenticated.timestamp)) return c.json({ error: 'Replay rejected' }, 409)
+
+  const pricedAssets = [...new Set(payload.balances
+    .filter((balance) => balance.asset !== 'THB' && balance.available + balance.reserved > 0)
+    .map((balance) => balance.asset))]
+  const priceRows: PriceCacheRow[] = []
+  for (let offset = 0; offset < pricedAssets.length; offset += maxAssetsPerQuery) {
+    const assets = pricedAssets.slice(offset, offset + maxAssetsPerQuery)
+    const result = await c.env.DB.prepare(`
+      SELECT asset, price, updated_at
+      FROM price_cache
+      WHERE quote = 'THB' AND asset IN (${assets.map(() => '?').join(', ')})
+    `).bind(...assets).all<PriceCacheRow>()
+    priceRows.push(...result.results)
+  }
+  const totalValue = portfolioValueAt(
+    payload.balances,
+    priceRows.map<PriceQuote>((price) => ({ asset: price.asset, price: price.price, quote: 'THB', updatedAt: price.updated_at })),
+    payload.snapshotAt,
+    portfolioHistoryPriceToleranceMs,
+  )
+
+  await c.env.DB.batch([
+    ...payload.balances.map((balance) => c.env.DB.prepare(
+      'INSERT INTO balance_snapshots (account_id, asset, available, reserved, snapshot_at) VALUES (?, ?, ?, ?, ?)',
+    ).bind(payload.accountId, balance.asset, balance.available, balance.reserved, payload.snapshotAt)),
+    c.env.DB.prepare('INSERT INTO sync_events (account_id, data_type, status, detail, occurred_at) VALUES (?, ?, ?, ?, ?)')
+      .bind(payload.accountId, 'balances', 'success', 'AWS Bitkub ingestion', payload.snapshotAt),
+    ...(totalValue === undefined ? [] : [c.env.DB.prepare(`
+      INSERT INTO portfolio_value_snapshots (account_id, interval, snapshot_at, total_value)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(account_id, interval) DO UPDATE SET
+        snapshot_at = excluded.snapshot_at,
+        total_value = excluded.total_value
+    `).bind(payload.accountId, Math.floor(payload.snapshotAt / 1_800_000), payload.snapshotAt, totalValue)]),
+  ])
+
+  return c.json({ ingested: true, snapshotAt: payload.snapshotAt })
+}
+
+const awsHistoryRecordId = (accountId: string, externalId: string): string => `${accountId.length}:${accountId}:${externalId}`
+
+const requiredHistoryId = (record: Record<string, unknown>): string | undefined => {
+  const id = record.id
+  return typeof id === 'string' && /^[A-Za-z0-9._:-]{1,256}$/.test(id) ? id : undefined
+}
+
+const isNonNegativeNumber = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value) && value >= 0
+
+const isPositiveTimestamp = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value > 0
+
+const insertAwsHistoryRecord = (db: D1Database, accountId: string, dataType: AwsHistoryDataType, record: Record<string, unknown>): D1PreparedStatement | undefined => {
+  const externalId = requiredHistoryId(record)
+  const executedAt = record.executedAt
+  if (!externalId || !isPositiveTimestamp(executedAt)) return undefined
+  const storedRawJson = '{}'
+
+  if (dataType === 'trades') {
+    const side = record.side
+    const baseAsset = record.baseAsset
+    const quoteAsset = record.quoteAsset
+    const price = record.price
+    const quoteAmount = record.quoteAmount
+    const amount = record.amount
+    const fee = record.fee
+    const feeAsset = record.feeAsset
+    if (
+      (side !== 'buy' && side !== 'sell')
+      || typeof baseAsset !== 'string' || normalizeAsset(baseAsset) !== baseAsset
+      || typeof quoteAsset !== 'string' || normalizeAsset(quoteAsset) !== quoteAsset
+      || typeof price !== 'number' || !Number.isFinite(price) || price <= 0
+      || (quoteAmount !== undefined && (!isNonNegativeNumber(quoteAmount) || quoteAmount === 0))
+      || !isNonNegativeNumber(amount) || !isNonNegativeNumber(fee)
+      || (feeAsset !== undefined && (typeof feeAsset !== 'string' || normalizeAsset(feeAsset) !== feeAsset))
+    ) return undefined
+    return db.prepare(`
+      INSERT INTO trades (id, account_id, external_id, side, base_asset, quote_asset, price, amount, quote_amount, fee, fee_asset, executed_at, raw_json)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(account_id, external_id) DO UPDATE SET
+        quote_amount = COALESCE(excluded.quote_amount, trades.quote_amount)
+      WHERE trades.quote_amount IS NULL AND excluded.quote_amount IS NOT NULL
+    `).bind(awsHistoryRecordId(accountId, externalId), accountId, externalId, side, baseAsset, quoteAsset, price, amount, quoteAmount ?? null, fee, feeAsset ?? null, executedAt, storedRawJson)
+  }
+
+  const direction = record.direction
+  const asset = dataType === 'fiat_transfers' ? record.currency : record.asset
+  const amount = record.amount
+  const fee = record.fee
+  if (
+    (direction !== 'deposit' && direction !== 'withdraw')
+    || typeof asset !== 'string' || normalizeAsset(asset) !== asset
+    || !isNonNegativeNumber(amount) || !isNonNegativeNumber(fee)
+  ) return undefined
+
+  if (dataType === 'crypto_transfers') {
+    const txHash = record.txHash
+    if (txHash !== undefined && (typeof txHash !== 'string' || txHash.length > 512 || !/^[\x20-\x7E]+$/.test(txHash))) return undefined
+    return db.prepare(`
+      INSERT INTO crypto_transfers (id, account_id, external_id, direction, asset, amount, fee, tx_hash, executed_at, raw_json)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(account_id, external_id) DO NOTHING
+    `).bind(awsHistoryRecordId(accountId, externalId), accountId, externalId, direction, asset, amount, fee, txHash ?? null, executedAt, storedRawJson)
+  }
+
+  return db.prepare(`
+    INSERT INTO fiat_transfers (id, account_id, external_id, direction, currency, amount, fee, executed_at, raw_json)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(account_id, external_id) DO NOTHING
+  `).bind(awsHistoryRecordId(accountId, externalId), accountId, externalId, direction, asset, amount, fee, executedAt, storedRawJson)
+}
+
+const getAwsSyncState = async (c: Context<HonoEnv>) => {
+  const authenticated = await authenticatedAwsIngestion(c)
+  if (authenticated instanceof Response) return authenticated
+  let parsedBody: unknown
+  try {
+    parsedBody = JSON.parse(authenticated.body) as unknown
+  } catch {
+    return c.json({ error: 'Invalid ingestion payload' }, 400)
+  }
+  const accountId = typeof parsedBody === 'object' && parsedBody !== null ? Reflect.get(parsedBody, 'accountId') : undefined
+  if (typeof accountId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(accountId)) return c.json({ error: 'Invalid ingestion payload' }, 400)
+  if (!await getActiveBitkubAccount(c.env.DB, accountId)) return c.json({ error: 'Not found' }, 404)
+  if (!await claimAwsIngestionNonce(c.env.DB, authenticated.nonce, authenticated.timestamp)) return c.json({ error: 'Replay rejected' }, 409)
+
+  const checkpoints = await c.env.DB.prepare(
+    `SELECT data_type, last_synced_at FROM sync_state WHERE account_id = ? AND data_type IN ('trades', 'crypto_transfers', 'fiat_transfers')`,
+  ).bind(accountId).all<{ data_type: AwsHistoryDataType, last_synced_at: number }>()
+  const byType = new Map(checkpoints.results.map((row) => [row.data_type, row.last_synced_at]))
+  return c.json({
+    cryptoTransfersSince: byType.get('crypto_transfers') ?? null,
+    fiatTransfersSince: byType.get('fiat_transfers') ?? null,
+    tradesSince: byType.get('trades') ?? null,
+  })
+}
+
+const ingestAwsHistory = async (c: Context<HonoEnv>) => {
+  const authenticated = await authenticatedAwsIngestion(c)
+  if (authenticated instanceof Response) return authenticated
+  let parsedBody: unknown
+  try {
+    parsedBody = JSON.parse(authenticated.body) as unknown
+  } catch {
+    return c.json({ error: 'Invalid ingestion payload' }, 400)
+  }
+  const payload = parseAwsHistoryIngestion(parsedBody)
+  if (!payload || payload.syncAt > authenticated.timestamp || authenticated.timestamp - payload.syncAt > 30 * 60 * 1_000) {
+    return c.json({ error: 'Invalid ingestion payload' }, 400)
+  }
+  if (!await getActiveBitkubAccount(c.env.DB, payload.accountId)) return c.json({ error: 'Not found' }, 404)
+  if (!await claimAwsIngestionNonce(c.env.DB, authenticated.nonce, authenticated.timestamp)) return c.json({ error: 'Replay rejected' }, 409)
+
+  const inserts = payload.records.map((record) => insertAwsHistoryRecord(c.env.DB, payload.accountId, payload.dataType, record))
+  if (inserts.some((statement) => statement === undefined)) return c.json({ error: 'Invalid ingestion payload' }, 400)
+  const completionStatements = payload.complete ? [
+    c.env.DB.prepare(`
+      INSERT INTO sync_state (account_id, data_type, last_synced_at, cursor)
+      VALUES (?, ?, ?, NULL)
+      ON CONFLICT(account_id, data_type) DO UPDATE SET
+        last_synced_at = MAX(sync_state.last_synced_at, excluded.last_synced_at),
+        cursor = NULL
+    `).bind(payload.accountId, payload.dataType, payload.syncAt),
+    c.env.DB.prepare('INSERT INTO sync_events (account_id, data_type, status, detail, occurred_at) VALUES (?, ?, ?, ?, ?)')
+      .bind(payload.accountId, payload.dataType, 'success', 'AWS Bitkub ingestion', payload.syncAt),
+  ] : []
+  await c.env.DB.batch([...(inserts as D1PreparedStatement[]), ...completionStatements])
+  return c.json({ complete: payload.complete, dataType: payload.dataType, ingested: true, recordCount: payload.records.length, syncAt: payload.syncAt })
+}
+
 const normalizeAssets = (value: string | undefined): string[] => {
   if (!value) return []
   const assets = value.split(',').map(normalizeAsset)
   if (assets.some((asset) => asset === undefined)) return []
-  return [...new Set(assets)].slice(0, 100) as string[]
+  return [...new Set(assets)].slice(0, maxAssetsPerQuery) as string[]
 }
 
 const getSyncStatus = async (db: D1Database, accountId?: string): Promise<SyncStatusRow[]> => {
   const query = `
     WITH data_types(data_type) AS (
       VALUES ('balances'), ('trades'), ('crypto_transfers'), ('fiat_transfers'), ('prices')
-    ),
-    latest AS (
-      SELECT account_id, data_type, MAX(id) AS id
-      FROM sync_events
-      GROUP BY account_id, data_type
     )
     SELECT
       accounts.id AS account_id,
@@ -380,10 +748,14 @@ const getSyncStatus = async (db: D1Database, accountId?: string): Promise<SyncSt
       sync_events.occurred_at
     FROM accounts
     CROSS JOIN data_types
-    LEFT JOIN latest
-      ON latest.account_id = accounts.id
-      AND latest.data_type = data_types.data_type
-    LEFT JOIN sync_events ON sync_events.id = latest.id
+    LEFT JOIN sync_events ON sync_events.id = (
+      SELECT latest.id
+      FROM sync_events AS latest
+      WHERE latest.account_id = accounts.id
+        AND latest.data_type = data_types.data_type
+      ORDER BY latest.occurred_at DESC, latest.id DESC
+      LIMIT 1
+    )
     WHERE accounts.archived_at IS NULL ${accountId ? 'AND accounts.id = ?' : ''}
     ORDER BY accounts.label, data_types.data_type
   `
@@ -439,15 +811,17 @@ const backupLimit = 5_000
 const getBackup = async (db: D1Database, from: number, to: number, accountId?: string): Promise<Record<string, unknown>> => {
   const accountCondition = ` AND account_id IN (SELECT id FROM accounts WHERE archived_at IS NULL)${accountId ? ' AND account_id = ?' : ''}`
   const bindHistory = (statement: D1PreparedStatement): D1PreparedStatement => accountId ? statement.bind(from, to, accountId) : statement.bind(from, to)
-  const [accounts, balances, prices, trades, cryptoTransfers, fiatTransfers, events] = await Promise.all([
-    accountId ? db.prepare('SELECT id, exchange, label, created_at FROM accounts WHERE id = ? AND archived_at IS NULL').bind(accountId).all() : db.prepare('SELECT id, exchange, label, created_at FROM accounts WHERE archived_at IS NULL ORDER BY label').all(),
-    bindHistory(db.prepare(`SELECT account_id, asset, available, reserved, snapshot_at FROM balance_snapshots WHERE snapshot_at >= ? AND snapshot_at <= ?${accountCondition} ORDER BY snapshot_at LIMIT ${backupLimit}`)).all(),
-    db.prepare(`SELECT asset, quote, price, snapshot_at FROM price_snapshots WHERE snapshot_at >= ? AND snapshot_at <= ? ORDER BY snapshot_at LIMIT ${backupLimit}`).bind(from, to).all(),
-    bindHistory(db.prepare(`SELECT id, account_id, side, base_asset, quote_asset, price, amount, fee, fee_asset, executed_at FROM trades WHERE executed_at >= ? AND executed_at <= ?${accountCondition} ORDER BY executed_at LIMIT ${backupLimit}`)).all(),
-    bindHistory(db.prepare(`SELECT id, account_id, direction, asset, amount, fee, tx_hash, executed_at FROM crypto_transfers WHERE executed_at >= ? AND executed_at <= ?${accountCondition} ORDER BY executed_at LIMIT ${backupLimit}`)).all(),
-    bindHistory(db.prepare(`SELECT id, account_id, direction, currency, amount, fee, executed_at FROM fiat_transfers WHERE executed_at >= ? AND executed_at <= ?${accountCondition} ORDER BY executed_at LIMIT ${backupLimit}`)).all(),
-    bindHistory(db.prepare(`SELECT id, account_id, data_type, status, detail, occurred_at FROM sync_events WHERE occurred_at >= ? AND occurred_at <= ?${accountCondition} ORDER BY occurred_at LIMIT ${backupLimit}`)).all(),
+  const results = await db.batch([
+    accountId ? db.prepare('SELECT id, exchange, label, created_at FROM accounts WHERE id = ? AND archived_at IS NULL').bind(accountId) : db.prepare('SELECT id, exchange, label, created_at FROM accounts WHERE archived_at IS NULL ORDER BY label'),
+    bindHistory(db.prepare(`SELECT account_id, asset, available, reserved, snapshot_at FROM balance_snapshots WHERE snapshot_at >= ? AND snapshot_at <= ?${accountCondition} ORDER BY snapshot_at LIMIT ${backupLimit}`)),
+    db.prepare(`SELECT asset, quote, price, snapshot_at FROM price_snapshots WHERE snapshot_at >= ? AND snapshot_at <= ? ORDER BY snapshot_at LIMIT ${backupLimit}`).bind(from, to),
+    bindHistory(db.prepare(`SELECT id, account_id, side, base_asset, quote_asset, price, amount, quote_amount, fee, fee_asset, executed_at FROM trades WHERE executed_at >= ? AND executed_at <= ?${accountCondition} ORDER BY executed_at LIMIT ${backupLimit}`)),
+    bindHistory(db.prepare(`SELECT id, account_id, direction, asset, amount, fee, tx_hash, executed_at FROM crypto_transfers WHERE executed_at >= ? AND executed_at <= ?${accountCondition} ORDER BY executed_at LIMIT ${backupLimit}`)),
+    bindHistory(db.prepare(`SELECT id, account_id, direction, currency, amount, fee, executed_at FROM fiat_transfers WHERE executed_at >= ? AND executed_at <= ?${accountCondition} ORDER BY executed_at LIMIT ${backupLimit}`)),
+    bindHistory(db.prepare(`SELECT id, account_id, data_type, status, detail, occurred_at FROM sync_events WHERE occurred_at >= ? AND occurred_at <= ?${accountCondition} ORDER BY occurred_at LIMIT ${backupLimit}`)),
   ])
+  if (results.length !== 7) throw new Error('D1 returned an incomplete backup batch')
+  const [accounts, balances, prices, trades, cryptoTransfers, fiatTransfers, events] = results as [D1Result, D1Result, D1Result, D1Result, D1Result, D1Result, D1Result]
   return {
     accountId: accountId ?? null,
     generatedAt: Date.now(),
@@ -719,6 +1093,9 @@ const api = factory
     }
   })
   .post('/sync/trigger', async (c) => {
+    if (readString(c.env, 'BITKUB_SECURE_SYNC_MODE') === 'aws-ingest') {
+      return c.json({ error: 'Manual secure sync runs on the AWS schedule' }, 503)
+    }
     const token = readString(c.env, 'INTERNAL_PUSH_TEST_TOKEN')
     if (!token) return c.json({ error: 'Manual sync is not configured' }, 503)
 
@@ -787,19 +1164,20 @@ const api = factory
   })
   .get('/history/value', async (c) => {
     const { from, to } = historyBounds(c.req.query('from'), c.req.query('to'), c.req.query('days'))
-    return c.json({ points: await getValueHistory(c.env.DB, from, to, c.req.query('account')) })
+    return c.json({ points: await getCachedValueHistory(c.env, from, to, c.req.query('account')) })
   })
   .get('/history/price/:asset', async (c) => {
     const asset = normalizeAsset(c.req.param('asset'))
     if (!asset) return c.json({ error: 'Invalid asset' }, 400)
     const { from, to } = historyBounds(c.req.query('from'), c.req.query('to'), c.req.query('days'))
-    return c.json({ asset, points: await getPriceHistory(c.env.DB, asset, from, to) })
+    const histories = await getCachedPriceHistories(c.env, [asset], from, to)
+    return c.json({ asset, points: histories[asset] ?? [] })
   })
   .get('/history/prices', async (c) => {
     const assets = normalizeAssets(c.req.query('assets'))
     if (assets.length === 0) return c.json({ error: 'At least one valid asset is required' }, 400)
     const { from, to } = historyBounds(c.req.query('from'), c.req.query('to'), c.req.query('days'))
-    return c.json({ series: await getPriceHistories(c.env.DB, assets, from, to) })
+    return c.json({ series: await getCachedPriceHistories(c.env, assets, from, to) })
   })
   .get('/sync-status', async (c) => c.json({ statuses: await getSyncStatus(c.env.DB, c.req.query('account')) }))
   .get('/sync-events', async (c) => c.json({ events: await getSyncEvents(c.env.DB, normalizeLimit(c.req.query('limit')), c.req.query('account')) }))
@@ -812,45 +1190,47 @@ const api = factory
     const rawCursor = c.req.query('cursor')
     const cursor = decodeCursor(rawCursor)
     if (rawCursor && !cursor) return c.json({ error: 'Invalid transaction cursor' }, 400)
-    const conditions = ['1 = 1']
+    const requestedType = transactionType && ['trade', 'crypto_transfer', 'fiat_transfer'].includes(transactionType)
+      ? transactionType as TransactionRow['category']
+      : undefined
+    const sources = [
+      { category: 'trade', columns: "source.id, source.account_id, 'trade' AS category, source.side AS direction, source.base_asset AS asset, source.amount, source.quote_asset, source.quote_amount, source.price, source.fee, source.executed_at", table: 'trades' },
+      { category: 'crypto_transfer', columns: "source.id, source.account_id, 'crypto_transfer' AS category, source.direction, source.asset, source.amount, NULL AS quote_asset, NULL AS quote_amount, NULL AS price, source.fee, source.executed_at", table: 'crypto_transfers' },
+      { category: 'fiat_transfer', columns: "source.id, source.account_id, 'fiat_transfer' AS category, source.direction, source.currency AS asset, source.amount, source.currency AS quote_asset, source.amount AS quote_amount, NULL AS price, source.fee, source.executed_at", table: 'fiat_transfers' },
+    ] as const
+    const selectedSources = requestedType ? sources.filter((source) => source.category === requestedType) : sources
     const bindings: Array<string | number> = []
-
-    if (accountId) {
-      conditions.push('records.account_id = ?')
-      bindings.push(accountId)
-    }
-
-    if (transactionType && ['trade', 'crypto_transfer', 'fiat_transfer'].includes(transactionType)) {
-      conditions.push('records.category = ?')
-      bindings.push(transactionType)
-    }
-
-    if (from !== undefined) {
-      conditions.push('records.executed_at >= ?')
-      bindings.push(from)
-    }
-
-    if (to !== undefined) {
-      conditions.push('records.executed_at <= ?')
-      bindings.push(to)
-    }
-
-    if (cursor) {
-      conditions.push('(records.executed_at < ? OR (records.executed_at = ? AND records.id < ?))')
-      bindings.push(cursor.executedAt, cursor.executedAt, cursor.id)
-    }
-
+    const branches = selectedSources.map((source) => {
+      const conditions = ['accounts.archived_at IS NULL']
+      if (accountId) {
+        conditions.push('source.account_id = ?')
+        bindings.push(accountId)
+      }
+      if (from !== undefined) {
+        conditions.push('source.executed_at >= ?')
+        bindings.push(from)
+      }
+      if (to !== undefined) {
+        conditions.push('source.executed_at <= ?')
+        bindings.push(to)
+      }
+      if (cursor) {
+        conditions.push('(source.executed_at < ? OR (source.executed_at = ? AND source.id < ?))')
+        bindings.push(cursor.executedAt, cursor.executedAt, cursor.id)
+      }
+      bindings.push(limit)
+      return `SELECT * FROM (
+        SELECT ${source.columns}
+        FROM ${source.table} AS source
+        JOIN accounts ON accounts.id = source.account_id
+        WHERE ${conditions.join(' AND ')}
+        ORDER BY source.executed_at DESC, source.id DESC
+        LIMIT ?
+      )`
+    })
     bindings.push(limit)
     const query = `
-      SELECT records.* FROM (
-        SELECT id, account_id, 'trade' AS category, side AS direction, base_asset AS asset, amount, quote_asset, price, fee, executed_at FROM trades
-        UNION ALL
-        SELECT id, account_id, 'crypto_transfer' AS category, direction, asset, amount, NULL AS quote_asset, NULL AS price, fee, executed_at FROM crypto_transfers
-        UNION ALL
-        SELECT id, account_id, 'fiat_transfer' AS category, direction, currency AS asset, amount, currency AS quote_asset, NULL AS price, fee, executed_at FROM fiat_transfers
-      ) AS records
-      JOIN accounts ON accounts.id = records.account_id AND accounts.archived_at IS NULL
-      WHERE ${conditions.join(' AND ')}
+      SELECT records.* FROM (${branches.join('\nUNION ALL\n')}) AS records
       ORDER BY records.executed_at DESC, records.id DESC
       LIMIT ?
     `
@@ -859,17 +1239,25 @@ const api = factory
     return c.json({ nextCursor: result.results.length === limit && last ? encodeCursor(last) : null, transactions: result.results })
   })
 
+const awsBitkubRoutes = createAwsBitkubRoutes({
+  balances: ingestAwsBalances,
+  history: ingestAwsHistory,
+  state: getAwsSyncState,
+})
+
 const app = factory
   .createApp()
   .use('*', async (c, next) => {
     const allowedOrigin = readString(c.env, 'ALLOWED_ORIGIN') ?? 'http://localhost:5173'
     const requestOrigin = c.req.header('Origin')
-    if (!['GET', 'HEAD', 'OPTIONS'].includes(c.req.method) && requestOrigin && requestOrigin !== allowedOrigin) {
+    const isCrossSite = c.req.header('Sec-Fetch-Site') === 'cross-site'
+    if (!['GET', 'HEAD', 'OPTIONS'].includes(c.req.method) && (isCrossSite || (requestOrigin && requestOrigin !== allowedOrigin))) {
       return c.json({ error: 'Origin not allowed' }, 403)
     }
     return cors({ allowHeaders: ['Content-Type'], allowMethods: ['DELETE', 'GET', 'PATCH', 'POST', 'PUT'], credentials: true, origin: allowedOrigin })(c, next)
   })
   .get('/health', (c) => c.json({ status: 'ok' }))
+  .route('/internal/aws-sync/bitkub', awsBitkubRoutes)
   .route('/api', api)
   .notFound((c) => c.json({ error: 'Not found' }, 404))
   .onError((error, c) => {

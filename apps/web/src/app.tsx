@@ -1,8 +1,9 @@
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, type TouchEvent } from 'react'
 import { useRegisterSW } from 'virtual:pwa-register/react'
-import { addPriceAlert, addWatchlistAsset, apiAccessRequired, apiAccessUrl, archiveAccount, loadAccounts, loadArchivedAccounts, loadAssetPriceHistories, loadAssetPriceHistory, loadBackup, loadDashboard, loadPushPublicKey, loadSyncEvents, loadTransactions, loadValueHistory, removeAllocationTarget, removePriceAlert, removePushSubscription, removeWatchlistAsset, restoreAccount, saveAllocationTarget, savePushSubscription, testPushDelivery, triggerManualSync } from './api'
+import { addPriceAlert, addWatchlistAsset, apiAccessRequired, apiAccessUrl, archiveAccount, loadAccounts, loadArchivedAccounts, loadAssetPriceHistories, loadAssetPriceHistory, loadBackup, loadDashboard, loadPushPublicKey, loadSyncEvents, loadTransactions, loadValueHistory, removeAllocationTarget, removePriceAlert, removePushSubscription, removeWatchlistAsset, restoreAccount, saveAllocationTarget, savePushSubscription, testPushDelivery } from './api'
 import type { Account, AllocationTarget, Dashboard, Holding, Portfolio, PriceAlert, PriceHistoryPoint, PushNotificationPreferences, SyncEvent, SyncStatus, Transaction, ValueHistoryPoint, WatchlistAsset } from './api'
 import { getCurrentPushSubscription, isPushSupported, subscribeToPush, unsubscribeFromPush } from './push'
+import { formatTransactionMoney, transactionValue } from './transaction-display'
 
 type View = 'overview' | 'history' | 'sync' | 'transactions'
 type Theme = 'light' | 'dark'
@@ -1778,6 +1779,10 @@ const transactionLabel = (transaction: Transaction, language: Language): string 
   return transaction.direction === 'deposit' ? (language === 'th' ? 'ฝากเงินบาท' : 'THB deposit') : (language === 'th' ? 'ถอนเงินบาท' : 'THB withdrawal')
 }
 
+const transactionBadgeClass = (transaction: Transaction): string => (
+  `transaction-badge ${transaction.category}-${transaction.direction}`
+)
+
 const Transactions = ({ language, nextCursor, onLoadMore, transactions, valuesVisible }: { language: Language; nextCursor: string | null; onLoadMore: () => Promise<void>; transactions: Transaction[]; valuesVisible: boolean }) => {
   const [query, setQuery] = useState('')
   const [filter, setFilter] = useState<TransactionFilter>('all')
@@ -1797,7 +1802,7 @@ const Transactions = ({ language, nextCursor, onLoadMore, transactions, valuesVi
   const exportTransactions = () => {
     downloadCsv(
       'moondi-transactions.csv',
-      ['Executed at', 'Type', 'Direction', 'Asset', 'Amount', 'Quote asset', 'Price', 'Fee', 'Account ID'],
+      ['Executed at', 'Type', 'Direction', 'Asset', 'Amount', 'Quote asset', 'Quote amount', 'Price', 'Fee', 'Account ID'],
       filteredTransactions.map((transaction) => [
         new Date(transaction.executed_at).toISOString(),
         transaction.category,
@@ -1805,6 +1810,7 @@ const Transactions = ({ language, nextCursor, onLoadMore, transactions, valuesVi
         transaction.asset,
         transaction.amount,
         transaction.quote_asset,
+        transaction.quote_amount,
         transaction.price,
         transaction.fee,
         transaction.account_id,
@@ -1861,13 +1867,20 @@ const Transactions = ({ language, nextCursor, onLoadMore, transactions, valuesVi
               <span>{language === 'th' ? 'ประเภท' : 'Type'}</span>
               <span>{language === 'th' ? 'สินทรัพย์' : 'Asset'}</span>
               <span>{language === 'th' ? 'จำนวน' : 'Amount'}</span>
+              <span>{language === 'th' ? 'ราคา/หน่วย' : 'Unit price'}</span>
+              <span>{language === 'th' ? 'มูลค่า' : 'Value'}</span>
             </div>
             {filteredTransactions.map((transaction) => (
               <div className="transaction-row" key={`${transaction.category}-${transaction.id}`} role="row">
                 <span>{dateTime(language).format(transaction.executed_at)}</span>
-                <span className="transaction-kind">{transactionLabel(transaction, language)}</span>
+                <span><span className={transactionBadgeClass(transaction)}>{transactionLabel(transaction, language)}</span></span>
                 <span>{transaction.asset}</span>
                 <span className={valuesVisible ? undefined : 'value-concealed'}>{quantity.format(transaction.amount)}</span>
+                <span className={valuesVisible ? undefined : 'value-concealed'}>{transaction.price === null || transaction.quote_asset === null ? '—' : formatTransactionMoney(language, transaction.price, transaction.quote_asset)}</span>
+                <span className={valuesVisible ? undefined : 'value-concealed'}>{(() => {
+                  const value = transactionValue(transaction)
+                  return value ? `${value.approximate ? '≈' : ''}${formatTransactionMoney(language, value.value, value.quoteAsset)}` : '—'
+                })()}</span>
               </div>
             ))}
           </div>
@@ -1876,12 +1889,19 @@ const Transactions = ({ language, nextCursor, onLoadMore, transactions, valuesVi
               <article className="mobile-transaction" key={`${transaction.category}-${transaction.id}`}>
                 <div className="mobile-transaction-meta">
                   <time>{dateTime(language).format(transaction.executed_at)}</time>
-                  <span className="transaction-kind">{transactionLabel(transaction, language)}</span>
+                  <span className={transactionBadgeClass(transaction)}>{transactionLabel(transaction, language)}</span>
                 </div>
                 <div className="mobile-transaction-main">
                   <strong>{transaction.asset}</strong>
                   <span className={valuesVisible ? undefined : 'value-concealed'}><small>{language === 'th' ? 'จำนวน' : 'Amount'}</small>{quantity.format(transaction.amount)}</span>
                 </div>
+                {transaction.price !== null || transactionValue(transaction) ? <div className={`mobile-transaction-values${valuesVisible ? '' : ' value-concealed'}`}>
+                  <span>{language === 'th' ? 'ราคา/หน่วย' : 'Unit price'} <strong>{transaction.price === null || transaction.quote_asset === null ? '—' : formatTransactionMoney(language, transaction.price, transaction.quote_asset)}</strong></span>
+                  <span>{language === 'th' ? 'มูลค่า' : 'Value'} <strong>{(() => {
+                    const value = transactionValue(transaction)
+                    return value ? `${value.approximate ? '≈' : ''}${formatTransactionMoney(language, value.value, value.quoteAsset)}` : '—'
+                  })()}</strong></span>
+                </div> : null}
               </article>
             ))}
           </div>
@@ -1917,8 +1937,6 @@ export const App = () => {
   const [watchlist, setWatchlist] = useState<WatchlistAsset[]>([])
   const [priceAlerts, setPriceAlerts] = useState<PriceAlert[]>([])
   const [allocationTargets, setAllocationTargets] = useState<AllocationTarget[]>([])
-  const [manualSyncMessage, setManualSyncMessage] = useState<string | null>(null)
-  const [isManualSyncWorking, setIsManualSyncWorking] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [valuesVisible, setValuesVisible] = useState(resolveValuesVisible)
   const [overviewSections, setOverviewSections] = useState(resolveOverviewSections)
@@ -1930,6 +1948,7 @@ export const App = () => {
   const pullStartY = useRef<number | null>(null)
   const pullDistanceRef = useRef(0)
   const dashboardRequestId = useRef(0)
+  const dashboardLoadedAt = useRef(0)
   const needsApiAccess = error === apiAccessRequired
 
   const loadDashboardScope = useCallback(async (accountId?: string) => {
@@ -1951,6 +1970,7 @@ export const App = () => {
     setWatchlist(dashboard.watchlist)
     setPriceAlerts(dashboard.priceAlerts)
     setAllocationTargets(dashboard.targets)
+    dashboardLoadedAt.current = Date.now()
     setError(null)
     return true
   }, [])
@@ -1982,6 +2002,23 @@ export const App = () => {
       active = false
     }
   }, [accessDenied, language, reloadDashboard, signedOut])
+
+  useEffect(() => {
+    if (accessDenied || signedOut) return
+    const refresh = () => {
+      if (document.visibilityState !== 'visible') return
+      void reloadDashboard().catch(() => undefined)
+    }
+    const refreshWhenStale = () => {
+      if (Date.now() - dashboardLoadedAt.current >= 5 * 60 * 1_000) refresh()
+    }
+    const interval = window.setInterval(refresh, 30 * 60 * 1_000)
+    document.addEventListener('visibilitychange', refreshWhenStale)
+    return () => {
+      window.clearInterval(interval)
+      document.removeEventListener('visibilitychange', refreshWhenStale)
+    }
+  }, [accessDenied, reloadDashboard, signedOut])
 
   useEffect(() => {
     if (accessDenied || signedOut) return
@@ -2047,23 +2084,6 @@ export const App = () => {
       return [...current, ...page.transactions.filter((transaction) => !existing.has(`${transaction.category}-${transaction.id}`))]
     })
     setNextTransactionCursor(page.nextCursor)
-  }
-
-  const requestManualSync = async () => {
-    setIsManualSyncWorking(true)
-    setManualSyncMessage(null)
-    try {
-      const { retryAt } = await triggerManualSync()
-      setManualSyncMessage(language === 'th' ? `เริ่ม sync แล้ว ข้อมูลจะอัปเดตหลังงานเสร็จ · กดได้อีก ${dateTime(language).format(retryAt)}` : `Sync started. Data updates when it finishes · available again ${dateTime(language).format(retryAt)}.`)
-      window.setTimeout(() => void reloadDashboard().catch(() => undefined), 12_000)
-    } catch (reason) {
-      const message = reason instanceof Error ? reason.message : ''
-      if (message === 'Manual sync is temporarily rate limited') setManualSyncMessage(language === 'th' ? 'เพิ่งเริ่ม sync ไปแล้ว กรุณารอสักครู่' : 'A manual sync was recently started. Please wait a little.')
-      else if (message === 'A sync is already running') setManualSyncMessage(language === 'th' ? 'มีงาน sync กำลังทำงานอยู่แล้ว' : 'A sync is already running.')
-      else setManualSyncMessage(language === 'th' ? 'เริ่ม sync ไม่สำเร็จ ลองใหม่ภายหลัง' : 'Unable to start sync. Try again later.')
-    } finally {
-      setIsManualSyncWorking(false)
-    }
   }
 
   const downloadBackup = async () => {
@@ -2204,8 +2224,6 @@ export const App = () => {
           </section>
           <section className="freshness-banner" aria-live="polite">
             <div><strong>{language === 'th' ? 'อัปเดตข้อมูลแบบอ่านอย่างเดียว' : 'Read-only data refresh'}</strong><span>{portfolio?.updatedAt ? (language === 'th' ? `ข้อมูลล่าสุด ${dateTime(language).format(portfolio.updatedAt)}` : `Latest data ${dateTime(language).format(portfolio.updatedAt)}`) : (language === 'th' ? 'กำลังรอข้อมูลจาก sync แรก' : 'Waiting for the first sync.')}</span></div>
-            <button className="export-button" disabled={isManualSyncWorking} onClick={() => void requestManualSync()} type="button">{isManualSyncWorking ? (language === 'th' ? 'กำลังเริ่ม…' : 'Starting…') : (language === 'th' ? 'sync ตอนนี้' : 'Sync now')}</button>
-            {manualSyncMessage ? <p>{manualSyncMessage}</p> : null}
           </section>
           {overviewSections.history ? <PortfolioHistory language={language} onOpenHistory={() => setView('history')} points={history} valuesVisible={valuesVisible} /> : null}
           {overviewSections.allocation ? <PortfolioAllocation holdings={portfolio?.holdings ?? []} language={language} valuesVisible={valuesVisible} /> : null}

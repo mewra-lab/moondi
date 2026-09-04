@@ -6,6 +6,9 @@
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": false,
   "preview_urls": false,
+  "vars": {
+    "BITKUB_SECURE_SYNC_MODE": "worker"
+  },
   "d1_databases": [
     {
       "binding": "DB",

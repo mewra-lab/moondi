@@ -13,6 +13,9 @@ and authenticated access to the dashboard.
 - Create a dedicated Bitkub key with read permissions only.
 - Never enable trade or withdrawal permissions for Moondi.
 - Store production values with Cloudflare Worker secrets.
+- When AWS is the approved Bitkub egress executor, store that Lambda's
+  read-only key in AWS Systems Manager Parameter Store `SecureString`, scoped
+  to its execution role. Do not copy the Bitkub credential into an API Worker.
 - Store local values only in ignored `.dev.vars` files.
 - Revoke and recreate a key if it was pasted into an issue, terminal transcript,
 commit, screenshot, or third-party service.
@@ -23,6 +26,10 @@ commit, screenshot, or third-party service.
 - Use Google OAuth with an explicit email allow-list.
 - Test a non-allowed account before considering the deployment complete.
 - Do not exempt dashboard or API routes from Cloudflare Access.
+- An automated AWS ingestion client uses a dedicated Cloudflare Access service
+  token with a **Service Auth** policy; it is not an Access bypass. The API
+  additionally requires a distinct HMAC secret, fresh timestamp, and one-time
+  nonce for every ingestion request.
 - Protect every hostname that can serve the application, not only the preferred
   custom domain. This includes the production `PROJECT.pages.dev` hostname and
   any `*.PROJECT.pages.dev` preview hostnames that remain enabled.
@@ -113,5 +120,11 @@ Cloudflare Access cookies:
 5. If a secret entered Git history, rotate first; history rewriting is not a
    substitute for revocation.
 6. Record the incident without copying sensitive values into a public issue.
+
+AWS history ingestion accepts only normalized, schema-validated records in
+bounded chunks. Every chunk requires Cloudflare Access service authentication,
+a body-bound HMAC, a fresh timestamp, and a single-use nonce. Partial chunks do
+not advance checkpoints; only the authenticated final chunk can mark the window
+complete, preventing a retry from silently skipping uncommitted history.
 
 See [SECURITY.md](../SECURITY.md) for private reporting.
