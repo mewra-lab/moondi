@@ -51,3 +51,65 @@ test('schema.sql matches the result of applying every migration', () => {
 
   assert.deepEqual(describeDatabase(schema), describeDatabase(migrated))
 })
+
+test('sparse snapshot migration preserves verified Bitkub archive coverage', () => {
+  const migrationsDirectory = `${repositoryRoot}db/migrations`
+  const migrationNames = readdirSync(migrationsDirectory)
+    .filter((name) => name.endsWith('.sql'))
+    .toSorted()
+  const database = buildDatabase(migrationNames
+    .filter((name) => name < '0017_sparse_snapshots_and_history_coverage.sql')
+    .map((name) => readFileSync(`${migrationsDirectory}/${name}`, 'utf8')))
+
+  database.prepare('INSERT INTO accounts (id, exchange, label, owner_email, created_at) VALUES (?, ?, ?, ?, ?)')
+    .run('bitkub-main', 'bitkub', 'Bitkub Main', 'owner@example.test', 1)
+  database.prepare('INSERT INTO bitkub_pnl_archive_imports (account_id, archive_before, source_record_count, verified_at) VALUES (?, ?, ?, ?)')
+    .run('bitkub-main', 100, 10, 90)
+  for (const dataType of ['trades', 'crypto_transfers', 'fiat_transfers']) {
+    database.prepare('INSERT INTO sync_state (account_id, data_type, last_synced_at, cursor) VALUES (?, ?, ?, NULL)')
+      .run('bitkub-main', dataType, 200)
+  }
+
+  database.exec(readFileSync(`${migrationsDirectory}/0017_sparse_snapshots_and_history_coverage.sql`, 'utf8'))
+
+  assert.deepEqual(database.prepare(`
+    SELECT data_type, covered_from
+    FROM sync_state
+    WHERE account_id = 'bitkub-main'
+    ORDER BY data_type
+  `).all().map((row) => ({ ...row })), [
+    { covered_from: 100, data_type: 'crypto_transfers' },
+    { covered_from: 100, data_type: 'fiat_transfers' },
+    { covered_from: 100, data_type: 'trades' },
+  ])
+})
+
+test('coverage repair migration realigns checkpoints reset by migration 0017', () => {
+  const migrationsDirectory = `${repositoryRoot}db/migrations`
+  const migrationNames = readdirSync(migrationsDirectory)
+    .filter((name) => name.endsWith('.sql') && name < '0018_restore_verified_history_coverage.sql')
+    .toSorted()
+  const database = buildDatabase(migrationNames.map((name) => readFileSync(`${migrationsDirectory}/${name}`, 'utf8')))
+
+  database.prepare('INSERT INTO accounts (id, exchange, label, owner_email, created_at) VALUES (?, ?, ?, ?, ?)')
+    .run('bitkub-main', 'bitkub', 'Bitkub Main', 'owner@example.test', 1)
+  database.prepare('INSERT INTO bitkub_pnl_archive_imports (account_id, archive_before, source_record_count, verified_at) VALUES (?, ?, ?, ?)')
+    .run('bitkub-main', 100, 10, 90)
+  for (const [dataType, coveredFrom] of [['trades', 150], ['crypto_transfers', 150], ['fiat_transfers', null]]) {
+    database.prepare('INSERT INTO sync_state (account_id, data_type, last_synced_at, covered_from, cursor) VALUES (?, ?, ?, ?, NULL)')
+      .run('bitkub-main', dataType, 200, coveredFrom)
+  }
+
+  database.exec(readFileSync(`${migrationsDirectory}/0018_restore_verified_history_coverage.sql`, 'utf8'))
+
+  assert.deepEqual(database.prepare(`
+    SELECT data_type, covered_from
+    FROM sync_state
+    WHERE account_id = 'bitkub-main'
+    ORDER BY data_type
+  `).all().map((row) => ({ ...row })), [
+    { covered_from: 100, data_type: 'crypto_transfers' },
+    { covered_from: 100, data_type: 'fiat_transfers' },
+    { covered_from: 100, data_type: 'trades' },
+  ])
+})

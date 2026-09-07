@@ -56,6 +56,22 @@ WHERE balances.available + balances.reserved > 0
 DROP INDEX IF EXISTS balance_snapshots_account_time_idx;
 DROP INDEX IF EXISTS price_snapshots_quote_time_idx;
 
+UPDATE sync_state
+SET covered_from = (
+  SELECT imports.archive_before
+  FROM bitkub_pnl_archive_imports AS imports
+  WHERE imports.account_id = sync_state.account_id
+)
+WHERE data_type IN ('trades', 'crypto_transfers', 'fiat_transfers')
+  AND account_id IN (SELECT id FROM accounts WHERE exchange = 'bitkub')
+  AND EXISTS (
+    SELECT 1
+    FROM bitkub_pnl_archive_imports AS imports
+    WHERE imports.account_id = sync_state.account_id
+      AND imports.archive_before <= sync_state.last_synced_at
+  );
+
 DELETE FROM sync_state
 WHERE data_type IN ('trades', 'crypto_transfers', 'fiat_transfers')
-  AND account_id IN (SELECT id FROM accounts WHERE exchange = 'bitkub');
+  AND account_id IN (SELECT id FROM accounts WHERE exchange = 'bitkub')
+  AND covered_from IS NULL;

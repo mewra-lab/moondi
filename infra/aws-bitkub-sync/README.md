@@ -20,9 +20,10 @@ chunks; only the final accepted chunk advances that data type's checkpoint, so
 a retry cannot silently skip a partially delivered history window.
 
 The first completed history stream establishes a shared `covered_from` timestamp,
-and retries reuse that boundary for every history type. That is the start of the
-retained Bitkub API window and is deliberately separate from `last_synced_at`.
-Lifetime P&L is enabled only when a locally
+and retries reuse that boundary for every history type. When a verified archive
+already exists, migrations preserve its cutoff as that shared boundary instead
+of discarding proven coverage. The boundary is deliberately separate from
+`last_synced_at`. Lifetime P&L is enabled only when a locally
 verified website export ends at exactly the same boundary. The Lambda does not
 call Bitkub's undocumented browser endpoint, use website cookies, or claim that
 the documented API can return records older than roughly 90 days.

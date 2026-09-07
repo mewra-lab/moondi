@@ -119,7 +119,7 @@ because it cannot preserve the archive/live coverage boundary.
 
 ### 1. Prepare Cloudflare
 
-1. Apply every pending migration through `0017_sparse_snapshots_and_history_coverage.sql`
+1. Apply every pending migration through `0018_restore_verified_history_coverage.sql`
    using the migration command above.
 2. Set an `AWS_SYNC_INGESTION_SECRET` secret on the **API Worker**. Generate one
    random value in a password manager, paste the same value into AWS Parameter

@@ -102,12 +102,16 @@ is not in Bitkub's public API contract. Do not call it from Lambda/Workers,
 automate a session cookie, or store its raw response in D1. Download through
 Bitkub's own UI and keep the files local.
 
-After applying migrations through `0017`, deploy the matching API and Lambda,
-then let all three history streams finish once. Migration `0017` intentionally
-clears their checkpoints so the new run records a provable `covered_from`
-boundary. If a run completes only some streams, the next run reuses the earliest
-established boundary and backfills the others from there. Query that boundary
-from D1: all three rows must be present and have the same value.
+After applying migrations through `0018`, deploy the matching API and Lambda,
+then let all three history streams finish once. Migration `0017` preserves the
+archive cutoff as `covered_from` when a verified archive already exists and its
+cutoff is not newer than the completed checkpoint. It clears only unverified
+history checkpoints so a new run can record a provable boundary. Migration
+`0018` repairs installations that applied the earlier `0017` behavior by
+realigning all three completed streams to that verified cutoff. If a run
+completes only some streams, the next run reuses the earliest established
+boundary and backfills the others from there. Query that boundary from D1: all
+three rows must be present and have the same value.
 
 ```sql
 SELECT data_type, covered_from, last_synced_at
@@ -156,8 +160,10 @@ the latest Bitkub balance, or when a holding has no normalized history.
 4. Run `npm run check`, `npm test`, and `npm run build`.
 5. Apply migrations once, before Workers depending on them. Migration `0017`
    creates sparse per-asset value materialization, removes redundant indexes,
-   and clears the three Bitkub history checkpoints so coverage can be proven.
-   P&L stays withheld until live coverage and the verified archive meet.
+   and preserves verified archive coverage while resetting only unverified
+   Bitkub history checkpoints. Migration `0018` repairs coverage metadata for
+   installations that already applied the earlier `0017`. P&L stays withheld
+   until live coverage and the verified archive meet.
 6. For an existing AWS secure-sync installation, pause EventBridge, deploy the
    API, update and manually test Lambda, then resume EventBridge. Deploy the
    sync Worker and Pages afterward (the history chunk protocol must be live
