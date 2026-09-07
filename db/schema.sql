@@ -19,9 +19,6 @@ CREATE TABLE IF NOT EXISTS balance_snapshots (
   snapshot_at INTEGER NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS balance_snapshots_account_time_idx
-  ON balance_snapshots(account_id, snapshot_at DESC);
-
 CREATE INDEX IF NOT EXISTS balance_snapshots_account_time_asset_idx
   ON balance_snapshots(account_id, snapshot_at DESC, asset);
 
@@ -72,6 +69,19 @@ CREATE INDEX IF NOT EXISTS crypto_transfers_account_executed_id_idx
 CREATE INDEX IF NOT EXISTS crypto_transfers_executed_id_idx
   ON crypto_transfers(executed_at DESC, id DESC);
 
+CREATE TABLE IF NOT EXISTS crypto_transfer_cost_basis (
+  transfer_id TEXT PRIMARY KEY REFERENCES crypto_transfers(id),
+  total_cost_thb REAL NOT NULL CHECK(total_cost_thb >= 0),
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS bitkub_pnl_archive_imports (
+  account_id TEXT PRIMARY KEY REFERENCES accounts(id),
+  archive_before INTEGER NOT NULL,
+  source_record_count INTEGER NOT NULL CHECK(source_record_count > 0),
+  verified_at INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS fiat_transfers (
   id TEXT PRIMARY KEY,
   account_id TEXT NOT NULL REFERENCES accounts(id),
@@ -109,9 +119,6 @@ CREATE TABLE IF NOT EXISTS price_snapshots (
   PRIMARY KEY (asset, quote, snapshot_at)
 );
 
-CREATE INDEX IF NOT EXISTS price_snapshots_quote_time_idx
-  ON price_snapshots(quote, snapshot_at DESC);
-
 CREATE TABLE IF NOT EXISTS portfolio_value_snapshots (
   account_id TEXT NOT NULL REFERENCES accounts(id),
   interval INTEGER NOT NULL,
@@ -126,10 +133,24 @@ CREATE INDEX IF NOT EXISTS portfolio_value_snapshots_time_account_idx
 CREATE INDEX IF NOT EXISTS portfolio_value_snapshots_account_time_idx
   ON portfolio_value_snapshots(account_id, snapshot_at);
 
+CREATE TABLE IF NOT EXISTS portfolio_asset_value_snapshots (
+  account_id TEXT NOT NULL REFERENCES accounts(id),
+  asset TEXT NOT NULL,
+  interval INTEGER NOT NULL,
+  snapshot_at INTEGER NOT NULL,
+  quantity REAL NOT NULL CHECK(quantity > 0),
+  value REAL NOT NULL CHECK(value >= 0),
+  PRIMARY KEY (account_id, asset, interval)
+);
+
+CREATE INDEX IF NOT EXISTS portfolio_asset_value_snapshots_asset_interval_account_idx
+  ON portfolio_asset_value_snapshots(asset, interval, account_id);
+
 CREATE TABLE IF NOT EXISTS sync_state (
   account_id TEXT NOT NULL REFERENCES accounts(id),
   data_type TEXT NOT NULL,
   last_synced_at INTEGER NOT NULL,
+  covered_from INTEGER,
   cursor TEXT,
   PRIMARY KEY (account_id, data_type)
 );

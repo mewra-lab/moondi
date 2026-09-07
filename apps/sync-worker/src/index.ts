@@ -4,7 +4,7 @@ import * as webpush from 'web-push'
 import type { PushSubscription as WebPushSubscription, RequestOptions as WebPushRequestOptions } from 'web-push'
 import { credentialIssue, parseBitkubCredentialSource, resolveBitkubCredentials, scopedExchangeRecordId, type BitkubCredentials } from './account-credentials'
 import { savePortfolioValueSnapshot } from './portfolio-snapshots'
-import { mergeTradeAssets } from './sync-selection'
+import { balancesForSnapshot, historyFetchStart, mergeTradeAssets, pricesForPersistence, sharedHistoryCoverage } from './sync-selection'
 
 declare global {
   interface SubtleCrypto {
@@ -19,6 +19,7 @@ type Account = {
 }
 
 type SyncState = {
+  covered_from: number | null
   last_synced_at: number
 }
 
@@ -76,9 +77,8 @@ const isPushEndpoint = (value: unknown): value is string => {
   }
 }
 
-const readLastSyncedAt = async (db: D1Database, accountId: string, dataType: string): Promise<number | undefined> => {
-  const result = await db.prepare('SELECT last_synced_at FROM sync_state WHERE account_id = ? AND data_type = ?').bind(accountId, dataType).first<SyncState>()
-  return result?.last_synced_at
+const readSyncState = async (db: D1Database, accountId: string, dataType: string): Promise<SyncState | null> => {
+  return db.prepare('SELECT last_synced_at, covered_from FROM sync_state WHERE account_id = ? AND data_type = ?').bind(accountId, dataType).first<SyncState>()
 }
 
 const readPreviouslyHeldAssets = async (db: D1Database, accountId: string): Promise<string[]> => {
@@ -93,27 +93,65 @@ const readPreviouslyHeldAssets = async (db: D1Database, accountId: string): Prom
   return result.results.map((row) => row.asset)
 }
 
-const saveState = async (db: D1Database, accountId: string, dataType: string, timestamp: number): Promise<void> => {
+const saveState = async (db: D1Database, accountId: string, dataType: string, timestamp: number, coveredFrom: number): Promise<void> => {
   await db
     .prepare(`
-      INSERT INTO sync_state (account_id, data_type, last_synced_at)
-      VALUES (?, ?, ?)
+      INSERT INTO sync_state (account_id, data_type, last_synced_at, covered_from)
+      VALUES (?, ?, ?, ?)
       ON CONFLICT(account_id, data_type)
-      DO UPDATE SET last_synced_at = MAX(sync_state.last_synced_at, excluded.last_synced_at)
+      DO UPDATE SET
+        last_synced_at = MAX(sync_state.last_synced_at, excluded.last_synced_at),
+        covered_from = CASE WHEN sync_state.covered_from IS NULL THEN excluded.covered_from ELSE MIN(sync_state.covered_from, excluded.covered_from) END
     `)
-    .bind(accountId, dataType, timestamp)
+    .bind(accountId, dataType, timestamp, coveredFrom)
     .run()
 }
 
 const saveBalances = async (db: D1Database, accountId: string, balances: NormalizedBalance[], timestamp: number): Promise<void> => {
-  if (balances.length === 0) return
+  const seenAssets = new Set<string>()
+  for (const balance of balances) {
+    if (
+      !/^[A-Z0-9_-]{1,20}$/.test(balance.asset)
+      || !Number.isFinite(balance.available)
+      || balance.available < 0
+      || !Number.isFinite(balance.reserved)
+      || balance.reserved < 0
+      || seenAssets.has(balance.asset)
+    ) throw new Error('Bitkub balance response is not a complete safe snapshot')
+    seenAssets.add(balance.asset)
+  }
+  if (!seenAssets.has('THB')) throw new Error('Bitkub balance response has no THB snapshot marker')
+  const persisted = balancesForSnapshot(balances)
+  if (persisted.length === 0) return
   await db.batch(
-    balances.map((balance) =>
+    persisted.map((balance) =>
       db
         .prepare('INSERT INTO balance_snapshots (account_id, asset, available, reserved, snapshot_at) VALUES (?, ?, ?, ?, ?)')
         .bind(accountId, balance.asset, balance.available, balance.reserved, timestamp),
     ),
   )
+}
+
+const readPersistedPriceAssets = async (db: D1Database): Promise<Set<string>> => {
+  const result = await db.prepare(`
+    SELECT asset FROM asset_watchlist
+    UNION
+    SELECT asset FROM price_alerts WHERE active = 1
+    UNION
+    SELECT balances.asset
+    FROM accounts
+    JOIN balance_snapshots AS balances ON balances.account_id = accounts.id
+      AND balances.snapshot_at = (
+        SELECT MAX(candidate.snapshot_at)
+        FROM balance_snapshots AS candidate
+        WHERE candidate.account_id = accounts.id
+      )
+    WHERE accounts.exchange = 'bitkub'
+      AND accounts.archived_at IS NULL
+      AND balances.asset != 'THB'
+      AND balances.available + balances.reserved > 0
+  `).all<{ asset: string }>()
+  return new Set(result.results.map((row) => row.asset))
 }
 
 const saveTrades = async (db: D1Database, accountId: string, trades: NormalizedTrade[]): Promise<NormalizedTrade[]> => {
@@ -376,12 +414,19 @@ const logHistoryFailure = async (env: Env, accountId: string, dataType: string, 
 
 const syncBitkubAccount = async (env: Env, account: Account, credentials: BitkubCredentials, timestamp: number): Promise<void> => {
   const adapter = new BitkubAdapter(credentials)
-  const [tradesSince, cryptoSince, fiatSince, previouslyHeldAssets] = await Promise.all([
-    readLastSyncedAt(env.DB, account.id, 'trades'),
-    readLastSyncedAt(env.DB, account.id, 'crypto_transfers'),
-    readLastSyncedAt(env.DB, account.id, 'fiat_transfers'),
+  const [tradeState, cryptoState, fiatState, previouslyHeldAssets] = await Promise.all([
+    readSyncState(env.DB, account.id, 'trades'),
+    readSyncState(env.DB, account.id, 'crypto_transfers'),
+    readSyncState(env.DB, account.id, 'fiat_transfers'),
     readPreviouslyHeldAssets(env.DB, account.id),
   ])
+  const initialCoverage = sharedHistoryCoverage(timestamp - 90 * 24 * 60 * 60 * 1_000, [tradeState, cryptoState, fiatState])
+  const tradesCoverage = initialCoverage
+  const cryptoCoverage = initialCoverage
+  const fiatCoverage = initialCoverage
+  const tradesSince = historyFetchStart(tradeState, initialCoverage)
+  const cryptoSince = historyFetchStart(cryptoState, initialCoverage)
+  const fiatSince = historyFetchStart(fiatState, initialCoverage)
   let balances: NormalizedBalance[]
 
   try {
@@ -412,7 +457,7 @@ const syncBitkubAccount = async (env: Env, account: Account, credentials: Bitkub
 
   if (trades !== undefined) {
     const insertedTrades = await saveTrades(env.DB, account.id, trades)
-    await saveState(env.DB, account.id, 'trades', timestamp)
+    await saveState(env.DB, account.id, 'trades', timestamp, tradesCoverage)
     await saveSyncEvent(env.DB, account.id, 'trades', 'success', null, timestamp)
     await updatePushState(env.DB, account.id, 'trades', 'success', null)
     await notifyActivities(env, 'trades', account, 'Moondi มีประวัติซื้อ/ขายใหม่', insertedTrades.map((trade) => ({ amount: trade.amount, asset: trade.baseAsset, id: trade.id })))
@@ -430,7 +475,7 @@ const syncBitkubAccount = async (env: Env, account: Account, credentials: Bitkub
 
   if (cryptoTransfers !== undefined) {
     const insertedTransfers = await saveCryptoTransfers(env.DB, account.id, cryptoTransfers)
-    await saveState(env.DB, account.id, 'crypto_transfers', timestamp)
+    await saveState(env.DB, account.id, 'crypto_transfers', timestamp, cryptoCoverage)
     await saveSyncEvent(env.DB, account.id, 'crypto_transfers', 'success', null, timestamp)
     await updatePushState(env.DB, account.id, 'crypto_transfers', 'success', null)
     await notifyActivities(env, 'cryptoTransfers', account, 'Moondi มีรายการโอนคริปโตใหม่', insertedTransfers.map((transfer) => ({ amount: transfer.amount, asset: transfer.asset, id: transfer.id })))
@@ -448,7 +493,7 @@ const syncBitkubAccount = async (env: Env, account: Account, credentials: Bitkub
 
   if (fiatTransfers !== undefined) {
     const insertedTransfers = await saveFiatTransfers(env.DB, account.id, fiatTransfers)
-    await saveState(env.DB, account.id, 'fiat_transfers', timestamp)
+    await saveState(env.DB, account.id, 'fiat_transfers', timestamp, fiatCoverage)
     await saveSyncEvent(env.DB, account.id, 'fiat_transfers', 'success', null, timestamp)
     await updatePushState(env.DB, account.id, 'fiat_transfers', 'success', null)
     await notifyActivities(env, 'fiatTransfers', account, 'Moondi มีรายการฝาก/ถอน THB ใหม่', insertedTransfers.map((transfer) => ({ amount: transfer.amount, asset: transfer.currency, id: transfer.id })))
@@ -473,7 +518,8 @@ const syncBitkubPrices = async (
 
   try {
     const prices = await adapter.fetchPrices()
-    await savePrices(env.DB, prices, timestamp)
+    const persistedAssets = await readPersistedPriceAssets(env.DB)
+    await savePrices(env.DB, pricesForPersistence(prices, persistedAssets), timestamp)
     await Promise.all(portfolioAccounts.map((account) => savePortfolioValueSnapshot(env.DB, account.id, prices)))
     await notifyPriceAlerts(env, prices, timestamp)
     await Promise.all(accounts.map(async (account) => {

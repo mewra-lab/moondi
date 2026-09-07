@@ -1,5 +1,6 @@
 export type Holding = {
   account_id: string
+  account_exchange: string
   account_label: string
   asset: string
   available: number
@@ -17,8 +18,42 @@ export type Account = {
 
 export type Portfolio = {
   holdings: Holding[]
+  pnl: PnlSummary
   totalValue: number
   updatedAt: number | null
+}
+
+export type PnlAsset = {
+  asset: string
+  averageCost: number | null
+  costBasis: number | null
+  currentValue: number | null
+  pnlPercent: number | null
+  quantity: number
+  realizedCostBasis: number | null
+  realizedPnl: number | null
+  status: 'ready' | 'missing_cost_basis' | 'unsupported_quote' | 'quantity_mismatch' | 'missing_price' | 'missing_history'
+  totalPnl: number | null
+  unrealizedPnl: number | null
+}
+
+export type MissingCostBasis = {
+  amount: number
+  asset: string
+  executedAt: number
+  transferId: string
+}
+
+export type PnlSummary = {
+  assets: PnlAsset[]
+  complete: boolean
+  historyComplete: boolean
+  investedAmount: number | null
+  missingCostBasis: MissingCostBasis[]
+  missingHistoryAccounts: string[]
+  realizedPnl: number | null
+  totalPnl: number | null
+  unrealizedPnl: number | null
 }
 
 export type Transaction = {
@@ -36,11 +71,14 @@ export type Transaction = {
 }
 
 export type ValueHistoryPoint = {
+  invested_value: number | null
+  selected_value: number | null
   snapshot_at: number
   total_value: number
 }
 
 export type PriceHistoryPoint = {
+  average_cost?: number | null
   snapshot_at: number
   price: number
 }
@@ -170,6 +208,14 @@ export const restoreAccount = async (accountId: string): Promise<void> => {
   await request<{ ok: true }>(`/api/accounts/${encodeURIComponent(accountId)}/restore`, { method: 'POST' })
 }
 
+export const saveCryptoTransferCostBasis = async (transferId: string, totalCostThb: number): Promise<void> => {
+  await request<{ costBasis: { totalCostThb: number; transferId: string; updatedAt: number } }>(`/api/cost-basis-overrides/${encodeURIComponent(transferId)}`, {
+    body: JSON.stringify({ totalCostThb }),
+    headers: { 'Content-Type': 'application/json' },
+    method: 'PUT',
+  })
+}
+
 export const loadDashboard = async (accountId?: string): Promise<Dashboard> => {
   const scope = scopedQuery(accountId)
   const [portfolio, transactions, history, syncStatus, watchlist, priceAlerts, targets] = await Promise.all([
@@ -193,12 +239,13 @@ export const loadDashboard = async (accountId?: string): Promise<Dashboard> => {
   }
 }
 
-export const loadValueHistory = async ({ accountId, days, from, to }: { accountId?: string | undefined; days?: number; from?: number; to?: number }): Promise<ValueHistoryPoint[]> => {
+export const loadValueHistory = async ({ accountId, assets, days, from, to }: { accountId?: string | undefined; assets?: readonly string[]; days?: number; from?: number; to?: number }): Promise<ValueHistoryPoint[]> => {
   const query = new URLSearchParams()
   if (days !== undefined) query.set('days', String(days))
   if (from !== undefined) query.set('from', String(from))
   if (to !== undefined) query.set('to', String(to))
   if (accountId) query.set('account', accountId)
+  if (assets && assets.length > 0) query.set('assets', [...new Set(assets)].join(','))
   const history = await request<{ points: ValueHistoryPoint[] }>(`/api/history/value?${query.toString()}`)
   return history.points
 }
@@ -207,8 +254,10 @@ export const loadSyncEvents = async (limit = 100, accountId?: string): Promise<S
   await request<{ events: SyncEvent[] }>(`/api/sync-events?limit=${Math.min(Math.max(Math.trunc(limit), 1), 100)}${scopedQuery(accountId)}`)
 ).events
 
-export const loadAssetPriceHistory = async (asset: string, { days, from }: { days?: number; from?: number }): Promise<PriceHistoryPoint[]> => {
+export const loadAssetPriceHistory = async (asset: string, { accountId, averageCost, days, from }: { accountId?: string | undefined; averageCost?: boolean; days?: number; from?: number }): Promise<PriceHistoryPoint[]> => {
   const query = new URLSearchParams()
+  if (accountId) query.set('account', accountId)
+  if (averageCost) query.set('averageCost', '1')
   if (days !== undefined) query.set('days', String(days))
   if (from !== undefined) query.set('from', String(from))
   const history = await request<{ points: PriceHistoryPoint[] }>(`/api/history/price/${encodeURIComponent(asset)}?${query.toString()}`)

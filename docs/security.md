@@ -18,7 +18,7 @@ and authenticated access to the dashboard.
   to its execution role. Do not copy the Bitkub credential into an API Worker.
 - Store local values only in ignored `.dev.vars` files.
 - Revoke and recreate a key if it was pasted into an issue, terminal transcript,
-commit, screenshot, or third-party service.
+  commit, screenshot, or third-party service.
 
 ### Authentication and authorization
 
@@ -94,6 +94,13 @@ Do not publish any of the following:
 Resource IDs are not password-equivalents, but configuration templates avoid
 accidental deployments against another person's infrastructure and reduce
 unnecessary metadata disclosure.
+
+Before every public push, inspect the staged filename list and diff, confirm
+only example Wrangler configs are tracked, and scan both the current tracked
+tree and Git history with a reputable secret scanner. Do not print suspected
+secret values into CI logs. A clean current tree does not make a credential
+that appeared in an older commit safe: revoke it first, then decide whether the
+repository history also needs rewriting.
 
 ## Production exposure check
 

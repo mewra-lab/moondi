@@ -174,8 +174,10 @@ to a specific exchange — only to the normalized tables.
   before coding):
   - Wallet balances (available + reserved) per asset.
   - My order history (buy/sell trades) — note: paginated, and history older
-    than ~90 days may be archived, so first sync should paginate fully and
-    later syncs only need "since last sync".
+    than ~90 days is archived. First sync paginates the retained window fully
+    and records its coverage boundary; later syncs use the checkpoint. Lifetime
+    P&L additionally requires a separately verified website export before that
+    exact boundary. The observed browser route is not a supported Lambda API.
   - Crypto deposit/withdrawal history.
   - Fiat (THB) deposit/withdrawal history (v4 endpoints) — this is the main
     signal for "money invested" if you fund the account with THB and buy
@@ -258,7 +260,7 @@ CREATE TABLE crypto_transfers (
   raw_json TEXT
 );
 
--- Fiat (THB) deposits/withdrawals — the primary "capital invested" signal
+-- Fiat (THB) deposits/withdrawals — account cash-flow history, not asset cost basis
 CREATE TABLE fiat_transfers (
   id TEXT PRIMARY KEY,
   account_id TEXT NOT NULL REFERENCES accounts(id),
@@ -307,13 +309,44 @@ Keep it simple and correct rather than clever:
      hardware wallet) need a manual cost-basis entry, since the exchange has
      no idea what you paid — expose a simple "edit cost basis" UI field for
      these, defaulting to "unknown / exclude from P&L" if not provided.
+   - The current P&L implementation is **Bitkub-only** and accepts only
+     THB-quoted trades. A trade quoted in another asset (for example USDT) is
+     excluded until the application has a verified historical THB conversion;
+     it must never be converted using a current price.
+   - A historical archive may be imported only through the local normalizer.
+     It retains the source record ID for idempotency but writes neither raw
+     payloads nor bank/account/address fields to D1. The import cutoff must be
+     strictly before the live sync's recorded `covered_from` boundary. The
+     archive marker and all three live-history coverage boundaries must match;
+     `last_synced_at` is a checkpoint and is not evidence of historical
+     coverage. Old trades without a `symbol` require an explicit per-record THB
+     confirmation and are never inferred from their base asset.
+     Before P&L is shown, reconstructed quantities must agree with the latest
+     balance snapshot for every included asset.
 3. **Unrealized P&L** = `current_holdings_qty * (current_price − avg_cost)`,
    summed across assets, using `price_cache`.
 4. **Total P&L** = realized + unrealized.
 5. **Portfolio value** = `sum(holdings_qty * current_price)` + THB cash
    balance.
+6. **Presentation and reconciliation** — P&L is an optional Overview section
+   shown by default. It opens on current holdings, with
+   controls for closed positions, assets requiring review, all assets, and an
+   selectable set of individual assets. Closed positions remain available because their realized
+   P&L is meaningful even when the current quantity is zero. A scoped P&L is
+   shown only when every asset in that selected view reconciles; it must not be
+   labelled as portfolio-wide P&L when another asset is unresolved. External
+   deposits retain per-transfer manual cost-basis fields because grouping them
+   would change the historical average-cost calculation; those fields are
+   collapsed until the viewer explicitly opens the review list.
+   Each ready asset also exposes its remaining cost basis, cost already closed
+   through sales, and **return on cost** = total P&L / (remaining cost basis +
+   sale cost basis). This percentage is not a market-price trend, not a
+   leveraged-return metric, and remains blank when there is no positive cost
+   denominator. A browser may locally exclude an asset from P&L views and
+   exports. This never changes source data, holdings, backend calculations, or
+   an actual portfolio-wide label; the UI must disclose the exclusion.
 
-Compute this in the Worker (not in the browser) on request, from the raw
+Compute this in the Worker (not in the browser) on request, from normalized
 `trades`/`transfers` tables — don't try to store running P&L in the DB, it's
 cheap enough to recompute per account (a few hundred/thousand rows) and
 avoids drift bugs.
@@ -330,13 +363,13 @@ All routes below sit behind Cloudflare Access.
 | GET | `/api/portfolio` | Aggregated balances, value, invested, P&L across accounts |
 | GET | `/api/portfolio/:accountId` | Same, scoped to one account |
 | GET | `/api/transactions?account=&type=&from=&to=&cursor=` | Paginated, filterable transaction feed (trades + transfers, unioned) |
-| GET | `/api/history/value?range=30d` | Time series of portfolio value from precomputed, complete account values |
+| GET | `/api/history/value?range=30d&assets=BTC,SOL` | Time series of portfolio value from precomputed, complete account values, with the selected assets’ remaining average-cost basis at each point |
 
 Cron Worker (not user-facing, triggered by Cron Trigger):
 
 | Trigger | Action |
 |---|---|
-| every 15 min (tune based on free-tier limits) | For each account: fetch balances → upsert `balance_snapshots`; fetch new trades/transfers since `sync_state.last_synced_at` → insert; refresh `price_cache` |
+| scheduled interval (tune based on free-tier limits) | For each account: store a sparse positive-balance snapshot plus THB marker; fetch new trades/transfers from the proven coverage/checkpoint boundary; refresh current and historical prices only for held, watched, or alerted assets; materialize complete portfolio and per-asset values |
 
 ---
 
@@ -351,7 +384,8 @@ Cron Worker (not user-facing, triggered by Cron Trigger):
     unrealized), asset allocation chart, per-account breakdown.
   - **Transactions** — filterable/searchable table (by exchange, asset,
     type, date range), paginated.
-  - **Asset detail** — a single coin's holdings, avg cost, P&L, trade
+  - **Asset detail** — a single coin's holdings, current price/value,
+    verified average-cost P&L and return on cost where available, and trade
     history for that asset.
   - **Portfolio card export** — generate a static, user-approved image on
     the device for saving, copying, or sharing; it creates no public route.
@@ -417,15 +451,37 @@ Cron Worker (not user-facing, triggered by Cron Trigger):
   changes stored portfolio data or sync behavior. The allocation chart is a
   composition of current estimated value, not invested capital or P&L.
 - Portfolio-value history is a valuation series materialized at ingestion into
-  one row per account and 30-minute interval. Balance and public-price jobs may
+  one row per account and 30-minute interval. Positive per-asset quantities and
+  values are materialized in the same interval, so selected-asset charts never
+  reconstruct values by joining raw balance and price history at request time.
+  Balance history is sparse (positive assets plus a THB snapshot marker), and
+  price history is persisted only for held, watched, or alerted THB assets.
+  When the browser supplies the
+  included, P&L-ready asset set from its Settings, the API derives a second
+  **invested value** line: the selected positions’ remaining average-cost basis
+  at each snapshot. This is not net THB funding, realized P&L, or a portfolio-
+  wide result when assets are excluded or unresolved. Balance and public-price jobs may
   run independently; either job attempts to materialize the latest complete
   balance after its counterpart arrives. A value is stored only when every positive non-THB holding
   has a price within 35 minutes of the balance timestamp. Combined points require
   every account active at that time, so partial account failures cannot appear as
   a portfolio-value drop. Current holdings come from one latest complete snapshot
   per account. The chart is not invested capital or P&L.
-- Cost basis and P&L remain intentionally unimplemented until trade and fiat
-  history are complete and independently verified.
+- Cost basis and P&L are available only after a verified Bitkub archive import
+  and complete current-window sync whose three `covered_from` boundaries equal
+  the archive cutoff. The Worker caches the bounded result in KV;
+  it recomputes from normalized ledger records after archive, balance, history,
+  or cost-basis changes and withholds aggregates on any unresolved asset.
+  The optional Overview panel defaults to current holdings and can separately
+  show closed positions, assets requiring review, all assets, or a selected
+  set of assets. Ready rows show cost basis, average buy price, current value, realized and
+  unrealized P&L, total P&L, and return on cost. These are separate from the
+  holding row's 24-hour market-price trend. The selected P&L view and
+  asset-inclusion preferences are browser-local, retained across refreshes
+  without an API or D1 write. Optional target, comparison, watchlist, and sync
+  sections default to hidden so the overview starts with the core portfolio.
+- A portfolio image is generated locally. Its verified-P&L mode can independently
+  conceal P&L amount, return, cost basis, and current value in the final image.
 - Bitkub API usage is read-only. No API/UI path for trade or withdrawal action
   is permitted.
 - A manual sync request is an explicit read-only action routed through an

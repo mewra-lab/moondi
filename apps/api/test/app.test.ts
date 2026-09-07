@@ -79,7 +79,7 @@ describe('API worker', () => {
     })
     const body = JSON.stringify({
       accountId: 'bitkub-main',
-      balances: [{ asset: 'BTC', available: 1.25, reserved: 0 }],
+      balances: [{ asset: 'BTC', available: 1.25, reserved: 0 }, { asset: 'THB', available: 0, reserved: 0 }],
       snapshotAt,
     })
     const request = await awsIngestionRequest(body)
@@ -136,7 +136,7 @@ describe('API worker', () => {
     })
     const request = await awsIngestionRequest(JSON.stringify({
       accountId: 'bitkub-main',
-      balances: [{ asset: 'BTC', available: 1, reserved: 0 }],
+      balances: [{ asset: 'BTC', available: 1, reserved: 0 }, { asset: 'THB', available: 0, reserved: 0 }],
       snapshotAt,
     }))
 
@@ -187,8 +187,11 @@ describe('API worker', () => {
       if (query.includes('SELECT id FROM accounts')) return { bind: vi.fn(() => ({ first: accountFirst })) }
       if (query.includes('DELETE FROM aws_ingestion_nonces')) return { bind: vi.fn(() => ({ run: cleanupRun })) }
       if (query.includes('INSERT INTO aws_ingestion_nonces')) return { bind: vi.fn(() => ({ run: claimRun })) }
-      if (query.includes('SELECT data_type, last_synced_at FROM sync_state')) {
-        return { bind: vi.fn(() => ({ all: vi.fn().mockResolvedValue({ results: [{ data_type: 'trades', last_synced_at: 123 }] }) })) }
+      if (query.includes('SELECT data_type, last_synced_at, covered_from FROM sync_state')) {
+        return { bind: vi.fn(() => ({ all: vi.fn().mockResolvedValue({ results: [
+          { covered_from: 100, data_type: 'trades', last_synced_at: 123 },
+          { covered_from: 120, data_type: 'crypto_transfers', last_synced_at: 130 },
+        ] }) })) }
       }
       return { bind: vi.fn(() => ({ run: vi.fn() })) }
     })
@@ -205,8 +208,12 @@ describe('API worker', () => {
 
     expect(response.status).toBe(200)
     await expect(response.json()).resolves.toEqual({
-      cryptoTransfersSince: null,
+      cryptoTransfersCoveredFrom: 120,
+      cryptoTransfersSince: 130,
+      fiatTransfersCoveredFrom: null,
       fiatTransfersSince: null,
+      historyCoverageAnchor: 100,
+      tradesCoveredFrom: 100,
       tradesSince: 123,
     })
     expect(prepare.mock.calls.filter(([query]) => String(query).includes('sync_state'))).toHaveLength(1)
@@ -230,6 +237,7 @@ describe('API worker', () => {
       JSON.stringify({
         accountId: 'bitkub-main',
         complete: true,
+        coveredFrom: syncAt - 90 * 24 * 60 * 60 * 1_000,
         dataType: 'trades',
         records: [{ amount: 0.1, baseAsset: 'BTC', executedAt: syncAt - 1_000, fee: 1, feeAsset: 'THB', id: 'BTCBUY1', price: 1_000_000, quoteAmount: 100_000, quoteAsset: 'THB', side: 'buy' }],
         syncAt,
@@ -247,10 +255,46 @@ describe('API worker', () => {
     await expect(response.json()).resolves.toEqual({ complete: true, dataType: 'trades', ingested: true, recordCount: 1, syncAt })
     expect(batch).toHaveBeenCalledOnce()
     expect(claimRun).toHaveBeenCalledOnce()
+    expect(prepare.mock.calls.some(([query]) => String(query).includes('fee = excluded.fee'))).toBe(true)
+    expect(prepare.mock.calls.some(([query]) => String(query).includes('quote_amount = excluded.quote_amount'))).toBe(true)
+  })
+
+  it('uses a unique P&L revision for each completed history mutation in the same sync cycle', async () => {
+    const batch = vi.fn().mockResolvedValue([])
+    const put = vi.fn().mockResolvedValue(undefined)
+    const prepare = vi.fn((query: string) => {
+      if (query.includes('SELECT id FROM accounts')) return { bind: vi.fn(() => ({ first: vi.fn().mockResolvedValue({ id: 'bitkub-main' }) })) }
+      if (query.includes('DELETE FROM aws_ingestion_nonces')) return { bind: vi.fn(() => ({ run: vi.fn().mockResolvedValue({ meta: { changes: 0 } }) })) }
+      if (query.includes('INSERT INTO aws_ingestion_nonces')) return { bind: vi.fn(() => ({ run: vi.fn().mockResolvedValue({ meta: { changes: 1 } }) })) }
+      return { bind: vi.fn(() => ({ run: vi.fn() })) }
+    })
+    const syncAt = Date.now()
+    const env = {
+      AWS_SYNC_INGESTION_SECRET: 'test-ingestion-secret',
+      CACHE: { put } as unknown as KVNamespace,
+      DB: { batch, prepare } as unknown as D1Database,
+    }
+    const requestFor = (dataType: 'trades' | 'crypto_transfers', nonce: string) => awsIngestionRequest(
+      JSON.stringify({ accountId: 'bitkub-main', complete: true, coveredFrom: syncAt - 1, dataType, records: [], syncAt }),
+      '/internal/aws-sync/bitkub/history',
+      'test-ingestion-secret',
+      nonce,
+    )
+
+    expect((await app.request(await requestFor('trades', 'same-cycle-trades'), undefined, env)).status).toBe(200)
+    expect((await app.request(await requestFor('crypto_transfers', 'same-cycle-crypto'), undefined, env)).status).toBe(200)
+
+    const revisions = put.mock.calls
+      .filter(([key]) => key === 'bitkub-pnl:revision:v1:bitkub-main')
+      .map(([, value]) => value)
+    expect(revisions).toHaveLength(2)
+    expect(new Set(revisions).size).toBe(2)
+    expect(revisions.every((value) => String(value).startsWith(`${syncAt}:`))).toBe(true)
   })
 
   it('does not advance an AWS history checkpoint before the final chunk', async () => {
     const batch = vi.fn().mockResolvedValue([])
+    const put = vi.fn().mockResolvedValue(undefined)
     const prepare = vi.fn((query: string) => {
       if (query.includes('SELECT id FROM accounts')) return { bind: vi.fn(() => ({ first: vi.fn().mockResolvedValue({ id: 'bitkub-main' }) })) }
       if (query.includes('DELETE FROM aws_ingestion_nonces')) return { bind: vi.fn(() => ({ run: vi.fn().mockResolvedValue({ meta: { changes: 0 } }) })) }
@@ -262,6 +306,7 @@ describe('API worker', () => {
       JSON.stringify({
         accountId: 'bitkub-main',
         complete: false,
+        coveredFrom: syncAt - 90 * 24 * 60 * 60 * 1_000,
         dataType: 'trades',
         records: [{ amount: 0.1, baseAsset: 'BTC', executedAt: syncAt - 1_000, fee: 1, feeAsset: 'THB', id: 'BTCBUY1', price: 1_000_000, quoteAmount: 100_000, quoteAsset: 'THB', side: 'buy' }],
         syncAt,
@@ -271,7 +316,7 @@ describe('API worker', () => {
 
     const response = await app.request(request, undefined, {
       AWS_SYNC_INGESTION_SECRET: 'test-ingestion-secret',
-      CACHE: {} as KVNamespace,
+      CACHE: { put } as unknown as KVNamespace,
       DB: { batch, prepare } as unknown as D1Database,
     })
 
@@ -279,6 +324,7 @@ describe('API worker', () => {
     await expect(response.json()).resolves.toEqual({ complete: false, dataType: 'trades', ingested: true, recordCount: 1, syncAt })
     expect(prepare.mock.calls.some(([query]) => String(query).includes('INSERT INTO sync_state'))).toBe(false)
     expect(prepare.mock.calls.some(([query]) => String(query).includes('INSERT INTO sync_events'))).toBe(false)
+    expect(put).not.toHaveBeenCalled()
   })
 
   it('caches the expensive value-history aggregation in KV', async () => {
@@ -295,7 +341,7 @@ describe('API worker', () => {
     expect(response.status).toBe(200)
     await expect(response.json()).resolves.toEqual({ points: [] })
     expect(get).toHaveBeenCalledOnce()
-    expect(put).toHaveBeenCalledWith(expect.stringMatching(/^value-history:v3:all:/), '[]', { expirationTtl: 300 })
+    expect(put).toHaveBeenCalledWith(expect.stringMatching(/^value-history:v8:/), '[]', { expirationTtl: 300 })
     expect(all).toHaveBeenCalledOnce()
   })
 
@@ -619,6 +665,33 @@ describe('API worker', () => {
     expect(bind).toHaveBeenCalledWith('BTC', expect.any(Number), expect.any(Number))
   })
 
+  it('derives an asset price chart’s historical average cost from the completed Bitkub ledger only when requested', async () => {
+    const trade = { account_id: 'bitkub-main', amount: 1, base_asset: 'BTC', executed_at: 50, fee: 0, fee_asset: 'THB', id: 'buy-btc', price: 100, quote_amount: 100, quote_asset: 'THB', side: 'buy' }
+    const prepare = vi.fn((query: string) => {
+      const results = query.includes('FROM price_snapshots')
+        ? [{ asset: 'BTC', price: 150, snapshot_at: 100 }]
+        : query.includes('bitkub_pnl_archive_imports')
+          ? [{ account_id: 'bitkub-main', archive_before: 1, history_coverage_boundary_count: 1, history_coverage_count: 3, latest_history_coverage_start: 1, verified_at: 1 }]
+          : query.includes('CROSS JOIN balance_snapshots')
+            ? [{ account_id: 'bitkub-main', account_exchange: 'bitkub', account_label: 'Bitkub Main', asset: 'BTC', available: 1, reserved: 0, price: 150, updated_at: 100 }]
+            : []
+      const all = vi.fn().mockResolvedValue({ results })
+      return { all, bind: vi.fn(() => ({ all })) }
+    })
+    const batch = vi.fn(async (statements: unknown[]) => statements.length === 3
+      ? [{ results: [trade] }, { results: [] }, { results: [] }]
+      : [{ results: [trade] }, { results: [] }])
+    const response = await app.request(
+      '/api/history/price/btc?days=1&averageCost=1',
+      undefined,
+      { CACHE: {} as KVNamespace, DB: { batch, prepare } as unknown as D1Database },
+    )
+
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toEqual({ asset: 'BTC', averageCostAvailable: true, points: [{ average_cost: 100, price: 150, snapshot_at: 100 }] })
+    expect(batch).toHaveBeenCalledTimes(2)
+  })
+
   it('keeps five-year price-history requests instead of clamping them to one year', async () => {
     const all = vi.fn().mockResolvedValue({ results: [] })
     const bind = vi.fn().mockReturnValue({ all })
@@ -634,7 +707,7 @@ describe('API worker', () => {
   })
 
   it('reads portfolio history from precomputed values and omits incomplete account intervals', async () => {
-    const all = vi.fn().mockResolvedValue({ results: [{ snapshot_at: 1_780_000_000_000, total_value: 50000 }] })
+    const all = vi.fn().mockResolvedValue({ results: [{ invested_value: null, snapshot_at: 1_780_000_000_000, total_value: 50000 }] })
     const bind = vi.fn().mockReturnValue({ all })
     const prepare = vi.fn().mockReturnValue({ bind })
     const response = await app.request(
@@ -644,22 +717,136 @@ describe('API worker', () => {
     )
 
     expect(response.status).toBe(200)
-    await expect(response.json()).resolves.toEqual({ points: [{ snapshot_at: 1_780_000_000_000, total_value: 50000 }] })
+    await expect(response.json()).resolves.toEqual({ points: [{ invested_value: null, selected_value: null, snapshot_at: 1_780_000_000_000, total_value: 50000 }] })
     const query = prepare.mock.calls[0]?.[0] as string
     expect(query).toContain('FROM portfolio_value_snapshots')
     expect(query).not.toContain('FROM balance_snapshots')
     expect(query).not.toContain('FROM price_snapshots')
     expect(query).toContain('COUNT(*) AS account_count')
     expect(query).toContain('SELECT COUNT(*) FROM scoped_accounts')
+    expect(query).not.toContain('fiat_transfers')
+    expect(query).not.toMatch(/\),\s*SELECT snapshot_at, total_value, NULL AS invested_value/)
+  })
+
+  it('derives the selected assets’ remaining average-cost basis without an extra query per snapshot', async () => {
+    const trade = { account_id: 'bitkub-main', amount: 1, base_asset: 'BTC', executed_at: 50, fee: 0, fee_asset: 'THB', id: 'buy-btc', price: 100, quote_amount: 100, quote_asset: 'THB', side: 'buy' }
+    const prepare = vi.fn((query: string) => {
+      const results = query.includes('portfolio_asset_value_snapshots')
+        ? [{ interval: 0, selected_value: 125 }]
+        : query.includes('bitkub_pnl_archive_imports')
+          ? [{ account_id: 'bitkub-main', archive_before: 1, history_coverage_boundary_count: 1, history_coverage_count: 3, latest_history_coverage_start: 1, verified_at: 1 }]
+          : query.includes('CROSS JOIN balance_snapshots')
+            ? [{ account_id: 'bitkub-main', account_exchange: 'bitkub', account_label: 'Bitkub Main', asset: 'BTC', available: 1, reserved: 0, price: 125, updated_at: 100 }]
+            : query.includes('portfolio_value_snapshots')
+              ? [{ invested_value: null, snapshot_at: 100, total_value: 500 }]
+              : []
+      const all = vi.fn().mockResolvedValue({ results })
+      return { all, bind: vi.fn(() => ({ all })) }
+    })
+    const batch = vi.fn(async (statements: unknown[]) => statements.length === 3
+      ? [{ results: [trade] }, { results: [] }, { results: [] }]
+      : [{ results: [trade] }, { results: [] }])
+
+    const response = await app.request(
+      '/api/history/value?days=1&assets=BTC',
+      undefined,
+      { CACHE: {} as KVNamespace, DB: { batch, prepare } as unknown as D1Database },
+    )
+
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toEqual({ points: [{ invested_value: 100, selected_value: 125, snapshot_at: 100, total_value: 500 }] })
+    expect(batch).toHaveBeenCalledTimes(2)
+    expect(prepare.mock.calls.some(([query]) => String(query).includes('portfolio_asset_value_snapshots'))).toBe(true)
+  })
+
+  it('withholds historical cost basis when the Bitkub archive is not verified', async () => {
+    const prepare = vi.fn((query: string) => {
+      const results = query.includes('bitkub_pnl_archive_imports')
+        ? [{ account_id: 'bitkub-main', archive_before: null, history_coverage_boundary_count: 1, history_coverage_count: 3, latest_history_coverage_start: 1, verified_at: null }]
+        : query.includes('CROSS JOIN balance_snapshots')
+          ? [{ account_id: 'bitkub-main', account_exchange: 'bitkub', account_label: 'Bitkub Main', asset: 'BTC', available: 1, reserved: 0, price: 125, updated_at: 100 }]
+          : query.includes('portfolio_asset_value_snapshots')
+            ? [{ interval: 0, selected_value: 125 }]
+            : query.includes('portfolio_value_snapshots')
+              ? [{ invested_value: null, snapshot_at: 100, total_value: 500 }]
+              : []
+      const all = vi.fn().mockResolvedValue({ results })
+      return { all, bind: vi.fn(() => ({ all })) }
+    })
+    const batch = vi.fn()
+
+    const response = await app.request('/api/history/value?days=1&assets=BTC', undefined, {
+      CACHE: {} as KVNamespace,
+      DB: { batch, prepare } as unknown as D1Database,
+    })
+
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toEqual({ points: [{ invested_value: null, selected_value: 125, snapshot_at: 100, total_value: 500 }] })
+    expect(batch).not.toHaveBeenCalled()
+  })
+
+  it('withholds an asset price chart’s average cost when history coverage is incomplete', async () => {
+    const prepare = vi.fn((query: string) => {
+      const results = query.includes('FROM price_snapshots')
+        ? [{ asset: 'BTC', price: 150, snapshot_at: 100 }]
+        : query.includes('bitkub_pnl_archive_imports')
+          ? [{ account_id: 'bitkub-main', archive_before: 1, history_coverage_boundary_count: 1, history_coverage_count: 2, latest_history_coverage_start: 1, verified_at: 1 }]
+          : query.includes('CROSS JOIN balance_snapshots')
+            ? [{ account_id: 'bitkub-main', account_exchange: 'bitkub', account_label: 'Bitkub Main', asset: 'BTC', available: 1, reserved: 0, price: 150, updated_at: 100 }]
+            : []
+      const all = vi.fn().mockResolvedValue({ results })
+      return { all, bind: vi.fn(() => ({ all })) }
+    })
+    const batch = vi.fn()
+
+    const response = await app.request('/api/history/price/BTC?days=1&averageCost=1', undefined, {
+      CACHE: {} as KVNamespace,
+      DB: { batch, prepare } as unknown as D1Database,
+    })
+
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toEqual({ asset: 'BTC', averageCostAvailable: false, points: [{ average_cost: null, price: 150, snapshot_at: 100 }] })
+    expect(batch).not.toHaveBeenCalled()
+  })
+
+  it('changes the value-history cache key when P&L inputs are invalidated', async () => {
+    const trade = { account_id: 'bitkub-main', amount: 1, base_asset: 'BTC', executed_at: 50, fee: 0, fee_asset: 'THB', id: 'buy-btc', price: 100, quote_amount: 100, quote_asset: 'THB', side: 'buy' }
+    const prepare = vi.fn((query: string) => {
+      const results = query.includes('bitkub_pnl_archive_imports')
+        ? [{ account_id: 'bitkub-main', archive_before: 1, history_coverage_boundary_count: 1, history_coverage_count: 3, latest_history_coverage_start: 1, verified_at: 1 }]
+        : query.includes('CROSS JOIN balance_snapshots')
+          ? [{ account_id: 'bitkub-main', account_exchange: 'bitkub', account_label: 'Bitkub Main', asset: 'BTC', available: 1, reserved: 0, price: 125, updated_at: 100 }]
+          : query.includes('portfolio_asset_value_snapshots')
+            ? [{ interval: 0, selected_value: 125 }]
+            : query.includes('portfolio_value_snapshots')
+              ? [{ invested_value: null, snapshot_at: 100, total_value: 500 }]
+              : []
+      const all = vi.fn().mockResolvedValue({ results })
+      return { all, bind: vi.fn(() => ({ all })) }
+    })
+    const batch = vi.fn(async () => [{ results: [trade] }, { results: [] }])
+    let revision = 'before-override'
+    const get = vi.fn(async (key: string) => key.startsWith('bitkub-pnl:revision:') ? revision : null)
+    const put = vi.fn().mockResolvedValue(undefined)
+    const env = { CACHE: { get, put } as unknown as KVNamespace, DB: { batch, prepare } as unknown as D1Database }
+
+    expect((await app.request('/api/history/value?days=1&assets=BTC', undefined, env)).status).toBe(200)
+    revision = 'after-override'
+    expect((await app.request('/api/history/value?days=1&assets=BTC', undefined, env)).status).toBe(200)
+
+    const historyKeys = put.mock.calls.map(([key]) => String(key)).filter((key) => key.startsWith('value-history:v8:'))
+    expect(historyKeys).toHaveLength(2)
+    expect(new Set(historyKeys).size).toBe(2)
   })
 
   it('builds current holdings from one complete latest account snapshot', async () => {
     const all = vi.fn().mockResolvedValue({ results: [] })
     const prepare = vi.fn().mockReturnValue({ all })
+    const batch = vi.fn().mockResolvedValue([{ results: [] }, { results: [] }, { results: [] }])
     const response = await app.request(
       '/api/portfolio',
       undefined,
-      { CACHE: {} as KVNamespace, DB: { prepare } as unknown as D1Database },
+      { CACHE: {} as KVNamespace, DB: { batch, prepare } as unknown as D1Database },
     )
 
     expect(response.status).toBe(200)
@@ -667,6 +854,189 @@ describe('API worker', () => {
     expect(query).toContain('WHERE candidate.account_id = accounts.id')
     expect(query).toContain('balances.snapshot_at AS updated_at')
     expect(query).not.toContain('GROUP BY')
+  })
+
+  it('reads verified Bitkub P&L in two indexed asset-ledger queries', async () => {
+    const holdings = vi.fn().mockResolvedValue({ results: [
+      { account_id: 'bitkub-main', account_exchange: 'bitkub', account_label: 'Bitkub Main', asset: 'BTC', available: 1, reserved: 0, price: 200, updated_at: 1 },
+      { account_id: 'binance-main', account_exchange: 'binance', account_label: 'Binance Main', asset: 'BTC', available: 9, reserved: 0, price: 200, updated_at: 1 },
+    ] })
+    const batch = vi.fn().mockResolvedValue([
+      { results: [{ account_id: 'bitkub-main', id: 'buy', side: 'buy', base_asset: 'BTC', quote_asset: 'THB', price: 100, amount: 1, quote_amount: 100, fee: 0, fee_asset: 'THB', executed_at: 1 }] },
+      { results: [] },
+    ])
+    const archiveScope = vi.fn().mockResolvedValue({ results: [{ account_id: 'bitkub-main', archive_before: 1, history_coverage_boundary_count: 1, history_coverage_count: 3, latest_history_coverage_start: 1, verified_at: 1 }] })
+    const prepare = vi.fn((query: string) => {
+      const all = query.includes('bitkub_pnl_archive_imports') ? archiveScope : holdings
+      return { all, bind: vi.fn(() => ({ all })) }
+    })
+
+    const response = await app.request('/api/portfolio', undefined, {
+      CACHE: {} as KVNamespace,
+      DB: { batch, prepare } as unknown as D1Database,
+    })
+
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toMatchObject({
+      pnl: { complete: true, investedAmount: 100, totalPnl: 100, unrealizedPnl: 100 },
+    })
+    expect(batch).toHaveBeenCalledOnce()
+    expect(batch.mock.calls[0]?.[0]).toHaveLength(2)
+    const pnlQueries = prepare.mock.calls.map(([query]) => String(query)).filter((query) => query.includes('WITH scoped_accounts'))
+    expect(pnlQueries).toHaveLength(2)
+    expect(pnlQueries.every((query) => query.includes('JOIN sync_state AS completed'))).toBe(true)
+    expect(pnlQueries.every((query) => query.includes('source.executed_at <= completed.last_synced_at'))).toBe(true)
+    expect(pnlQueries.some((query) => query.includes('fiat_transfers AS source'))).toBe(false)
+    expect(prepare.mock.calls.some(([query]) => String(query).includes('raw_json'))).toBe(false)
+  })
+
+  it('withholds P&L before a verified Bitkub archive import without scanning ledger history', async () => {
+    const holdings = vi.fn().mockResolvedValue({ results: [{ account_id: 'bitkub-main', account_exchange: 'bitkub', account_label: 'Bitkub Main', asset: 'BTC', available: 1, reserved: 0, price: 200, updated_at: 1 }] })
+    const archiveScope = vi.fn().mockResolvedValue({ results: [{ account_id: 'bitkub-main', archive_before: null, history_coverage_boundary_count: 1, history_coverage_count: 3, latest_history_coverage_start: 1, verified_at: null }] })
+    const batch = vi.fn()
+    const prepare = vi.fn((query: string) => ({
+      all: query.includes('bitkub_pnl_archive_imports') ? archiveScope : holdings,
+      bind: vi.fn(() => ({ all: query.includes('bitkub_pnl_archive_imports') ? archiveScope : holdings })),
+    }))
+
+    const response = await app.request('/api/portfolio', undefined, {
+      CACHE: {} as KVNamespace,
+      DB: { batch, prepare } as unknown as D1Database,
+    })
+
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toMatchObject({
+      pnl: { complete: false, historyComplete: false, missingHistoryAccounts: ['bitkub-main'], totalPnl: null },
+    })
+    expect(batch).not.toHaveBeenCalled()
+  })
+
+  it('withholds P&L until all three current Bitkub history streams complete', async () => {
+    const holdings = vi.fn().mockResolvedValue({ results: [{ account_id: 'bitkub-main', account_exchange: 'bitkub', account_label: 'Bitkub Main', asset: 'BTC', available: 1, reserved: 0, price: 200, updated_at: 1 }] })
+    const archiveScope = vi.fn().mockResolvedValue({ results: [{ account_id: 'bitkub-main', archive_before: 1, history_coverage_boundary_count: 1, history_coverage_count: 2, latest_history_coverage_start: 1, verified_at: 1 }] })
+    const batch = vi.fn()
+    const prepare = vi.fn((query: string) => ({
+      all: query.includes('bitkub_pnl_archive_imports') ? archiveScope : holdings,
+      bind: vi.fn(() => ({ all: query.includes('bitkub_pnl_archive_imports') ? archiveScope : holdings })),
+    }))
+
+    const response = await app.request('/api/portfolio', undefined, {
+      CACHE: {} as KVNamespace,
+      DB: { batch, prepare } as unknown as D1Database,
+    })
+
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toMatchObject({
+      pnl: { complete: false, historyComplete: false, missingHistoryAccounts: ['bitkub-main'], totalPnl: null },
+    })
+    expect(batch).not.toHaveBeenCalled()
+  })
+
+  it('withholds P&L when current Bitkub history streams use different coverage boundaries', async () => {
+    const holdings = vi.fn().mockResolvedValue({ results: [{ account_id: 'bitkub-main', account_exchange: 'bitkub', account_label: 'Bitkub Main', asset: 'BTC', available: 1, reserved: 0, price: 200, updated_at: 1 }] })
+    const archiveScope = vi.fn().mockResolvedValue({ results: [{ account_id: 'bitkub-main', archive_before: 1, history_coverage_boundary_count: 2, history_coverage_count: 3, latest_history_coverage_start: 2, verified_at: 1 }] })
+    const batch = vi.fn()
+    const prepare = vi.fn((query: string) => ({
+      all: query.includes('bitkub_pnl_archive_imports') ? archiveScope : holdings,
+      bind: vi.fn(() => ({ all: query.includes('bitkub_pnl_archive_imports') ? archiveScope : holdings })),
+    }))
+
+    const response = await app.request('/api/portfolio', undefined, {
+      CACHE: {} as KVNamespace,
+      DB: { batch, prepare } as unknown as D1Database,
+    })
+
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toMatchObject({
+      pnl: { complete: false, historyComplete: false, missingHistoryAccounts: ['bitkub-main'], totalPnl: null },
+    })
+    expect(batch).not.toHaveBeenCalled()
+  })
+
+  it('uses the KV P&L result on repeat reads instead of re-reading the ledger', async () => {
+    const cache = new Map<string, string>()
+    const holdings = vi.fn().mockResolvedValue({ results: [{ account_id: 'bitkub-main', account_exchange: 'bitkub', account_label: 'Bitkub Main', asset: 'BTC', available: 1, reserved: 0, price: 200, updated_at: 1 }] })
+    const archiveScope = vi.fn().mockResolvedValue({ results: [{ account_id: 'bitkub-main', archive_before: 1, history_coverage_boundary_count: 1, history_coverage_count: 3, latest_history_coverage_start: 1, verified_at: 1 }] })
+    const batch = vi.fn().mockResolvedValue([
+      { results: [{ account_id: 'bitkub-main', id: 'buy', side: 'buy', base_asset: 'BTC', quote_asset: 'THB', price: 100, amount: 1, quote_amount: 100, fee: 0, fee_asset: 'THB', executed_at: 1 }] },
+      { results: [] },
+      { results: [] },
+    ])
+    const prepare = vi.fn((query: string) => {
+      const all = query.includes('bitkub_pnl_archive_imports') ? archiveScope : holdings
+      return { all, bind: vi.fn(() => ({ all })) }
+    })
+    const CACHE = {
+      get: vi.fn(async (key: string, type?: string) => {
+        const value = cache.get(key)
+        return type === 'json' && value ? JSON.parse(value) : value ?? null
+      }),
+      put: vi.fn(async (key: string, value: string) => { cache.set(key, value) }),
+    } as unknown as KVNamespace
+    const env = { CACHE, DB: { batch, prepare } as unknown as D1Database }
+
+    expect((await app.request('/api/portfolio', undefined, env)).status).toBe(200)
+    expect((await app.request('/api/portfolio', undefined, env)).status).toBe(200)
+    expect(batch).toHaveBeenCalledOnce()
+  })
+
+  it('writes a cost-basis override only for an incoming Bitkub transfer and invalidates P&L', async () => {
+    const transfer = vi.fn().mockResolvedValue({ account_id: 'bitkub-main', id: 'incoming-transfer' })
+    const write = vi.fn().mockResolvedValue({ meta: { changes: 1 } })
+    const prepare = vi.fn((query: string) => ({
+      bind: vi.fn(() => ({ first: query.includes('FROM crypto_transfers') ? transfer : undefined, run: write })),
+    }))
+    const put = vi.fn().mockResolvedValue(undefined)
+
+    const response = await app.request('/api/cost-basis-overrides/incoming-transfer', {
+      body: JSON.stringify({ totalCostThb: 1_500 }),
+      headers: { 'content-type': 'application/json', Origin: 'http://localhost:5173' },
+      method: 'PUT',
+    }, {
+      ALLOWED_ORIGIN: 'http://localhost:5173',
+      CACHE: { put } as unknown as KVNamespace,
+      DB: { prepare } as unknown as D1Database,
+    })
+
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toMatchObject({ costBasis: { totalCostThb: 1_500, transferId: 'incoming-transfer' } })
+    expect(prepare).toHaveBeenCalledWith(expect.stringContaining('INSERT INTO crypto_transfer_cost_basis (transfer_id, total_cost_thb, updated_at)'))
+    expect(put).toHaveBeenCalledWith('bitkub-pnl:revision:v1:bitkub-main', expect.any(String))
+  })
+
+  it('rejects cost-basis writes that do not name a known incoming Bitkub transfer', async () => {
+    const first = vi.fn().mockResolvedValue(null)
+    const prepare = vi.fn().mockReturnValue({ bind: vi.fn(() => ({ first })) })
+
+    const response = await app.request('/api/cost-basis-overrides/not-found', {
+      body: JSON.stringify({ totalCostThb: 1_000 }),
+      headers: { 'content-type': 'application/json', Origin: 'http://localhost:5173' },
+      method: 'PUT',
+    }, {
+      ALLOWED_ORIGIN: 'http://localhost:5173',
+      CACHE: {} as KVNamespace,
+      DB: { prepare } as unknown as D1Database,
+    })
+
+    expect(response.status).toBe(404)
+    await expect(response.json()).resolves.toEqual({ error: 'Incoming Bitkub transfer not found' })
+  })
+
+  it('rejects a null cost basis instead of coercing it to zero', async () => {
+    const prepare = vi.fn()
+    const response = await app.request('/api/cost-basis-overrides/incoming-transfer', {
+      body: JSON.stringify({ totalCostThb: null }),
+      headers: { 'content-type': 'application/json', Origin: 'http://localhost:5173' },
+      method: 'PUT',
+    }, {
+      ALLOWED_ORIGIN: 'http://localhost:5173',
+      CACHE: {} as KVNamespace,
+      DB: { prepare } as unknown as D1Database,
+    })
+
+    expect(response.status).toBe(400)
+    await expect(response.json()).resolves.toEqual({ error: 'Invalid cost basis' })
+    expect(prepare).not.toHaveBeenCalled()
   })
 
   it('uses the cursor id as the deterministic transaction tie breaker', async () => {

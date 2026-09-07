@@ -4,6 +4,8 @@ The function has no public HTTP trigger or database credentials. EventBridge
 Scheduler is its production invoker, and secrets stay in SSM Parameter Store.
 """
 
+from __future__ import annotations
+
 import hashlib
 import hmac
 import json
@@ -30,6 +32,7 @@ MAX_RESPONSE_BYTES = 1_048_576
 MAX_INGESTION_RECORDS = 250
 MAX_INGESTION_BODY_BYTES = 400 * 1_024
 MAX_PAGINATION_PAGES = 1_000
+PROVIDER_HISTORY_WINDOW_MS = 90 * 24 * 60 * 60 * 1_000
 USER_AGENT = "moondi-aws-bitkub-sync/1.0"
 
 
@@ -205,6 +208,8 @@ def bitkub_balances(api_key: str, api_secret: str) -> list[dict[str, float | str
             raise RuntimeError("Bitkub returned an unsafe balance item")
         seen_assets.add(asset)
         normalized.append({"asset": asset, "available": available, "reserved": reserved})
+    if "THB" not in seen_assets:
+        raise RuntimeError("Bitkub returned no THB balance marker")
     return normalized
 
 
@@ -239,12 +244,13 @@ def map_trade(order: Any, symbol: str) -> dict[str, Any]:
         raise RuntimeError("Bitkub returned an invalid trade")
     base_asset, _, quote_asset = safe_symbol(symbol).rpartition("_")
     price = finite_number(order.get("rate"), "trade price", positive=True)
-    fee = finite_number(order.get("fee"), "trade fee")
+    reported_fee = finite_number(order.get("fee"), "trade fee")
     order_amount = finite_number(order.get("amount"), "trade amount")
     credit = finite_number(order.get("credit", 0), "trade credit")
+    fee = max(reported_fee - credit, 0)
     received = order.get("receive")
-    amount = order_amount if side == "sell" else (finite_number(received, "trade receive") if received is not None else (order_amount - max(fee - credit, 0)) / price)
-    quote_amount = order_amount if side == "buy" else amount * price
+    amount = order_amount if side == "sell" else (finite_number(received, "trade receive") if received is not None else (order_amount - fee) / price)
+    quote_amount = amount * price
     if not math.isfinite(amount) or amount < 0:
         raise RuntimeError("Bitkub returned an invalid trade amount")
     return {
@@ -439,13 +445,17 @@ def optional_checkpoint(value: Any, name: str) -> int | None:
     return value
 
 
+def history_fetch_start(checkpoint: int | None, covered_from: int | None, coverage_anchor: int) -> int:
+    return checkpoint if covered_from == coverage_anchor and checkpoint is not None else coverage_anchor
+
+
 def sync_state(
     ingestion_url: str,
     access_client_id: str,
     access_client_secret: str,
     ingestion_secret: str,
     account_id: str,
-) -> tuple[int | None, int | None, int | None]:
+) -> tuple[int | None, int | None, int | None, int | None, int | None, int | None, int | None]:
     response = post_ingestion(
         ingestion_url,
         "state",
@@ -456,8 +466,12 @@ def sync_state(
     )
     return (
         optional_checkpoint(response.get("tradesSince"), "trades"),
+        optional_checkpoint(response.get("tradesCoveredFrom"), "trades coverage"),
         optional_checkpoint(response.get("cryptoTransfersSince"), "crypto transfers"),
+        optional_checkpoint(response.get("cryptoTransfersCoveredFrom"), "crypto transfer coverage"),
         optional_checkpoint(response.get("fiatTransfersSince"), "fiat transfers"),
+        optional_checkpoint(response.get("fiatTransfersCoveredFrom"), "fiat transfer coverage"),
+        optional_checkpoint(response.get("historyCoverageAnchor"), "history coverage anchor"),
     )
 
 
@@ -469,6 +483,7 @@ def ingest_history_chunk(
     account_id: str,
     data_type: str,
     records: list[dict[str, Any]],
+    covered_from: int,
     sync_at: int,
     complete: bool,
 ) -> None:
@@ -478,7 +493,7 @@ def ingest_history_chunk(
         access_client_id,
         access_client_secret,
         ingestion_secret,
-        {"accountId": account_id, "complete": complete, "dataType": data_type, "records": records, "syncAt": sync_at},
+        {"accountId": account_id, "complete": complete, "coveredFrom": covered_from, "dataType": data_type, "records": records, "syncAt": sync_at},
     )
     if (
         response.get("ingested") is not True
@@ -497,6 +512,7 @@ def ingest_history_records(
     account_id: str,
     data_type: str,
     records: Iterable[dict[str, Any]],
+    covered_from: int,
     sync_at: int,
 ) -> int:
     buffered: list[dict[str, Any]] = []
@@ -506,6 +522,7 @@ def ingest_history_records(
         candidate_payload = {
             "accountId": account_id,
             "complete": False,
+            "coveredFrom": covered_from,
             "dataType": data_type,
             "records": candidate,
             "syncAt": sync_at,
@@ -522,6 +539,7 @@ def ingest_history_records(
                 account_id,
                 data_type,
                 buffered,
+                covered_from,
                 sync_at,
                 False,
             )
@@ -533,6 +551,7 @@ def ingest_history_records(
     final_payload = {
         "accountId": account_id,
         "complete": True,
+        "coveredFrom": covered_from,
         "dataType": data_type,
         "records": buffered,
         "syncAt": sync_at,
@@ -547,6 +566,7 @@ def ingest_history_records(
         account_id,
         data_type,
         buffered,
+        covered_from,
         sync_at,
         True,
     )
@@ -563,7 +583,7 @@ def lambda_handler(_event: dict[str, Any], _context: Any) -> dict[str, int | boo
     ingestion_url = required_environment("MOONDI_INGESTION_URL")
 
     try:
-        trades_since, crypto_since, fiat_since = sync_state(
+        trades_since, trades_covered_from, crypto_since, crypto_covered_from, fiat_since, fiat_covered_from, history_coverage_anchor = sync_state(
             ingestion_url,
             access_client_id,
             access_client_secret,
@@ -571,6 +591,13 @@ def lambda_handler(_event: dict[str, Any], _context: Any) -> dict[str, int | boo
             account_id,
         )
         cycle_started_at = int(time.time() * 1_000)
+        initial_coverage = history_coverage_anchor or cycle_started_at - PROVIDER_HISTORY_WINDOW_MS
+        trades_coverage = initial_coverage
+        crypto_coverage = initial_coverage
+        fiat_coverage = initial_coverage
+        trades_fetch_since = history_fetch_start(trades_since, trades_covered_from, initial_coverage)
+        crypto_fetch_since = history_fetch_start(crypto_since, crypto_covered_from, initial_coverage)
+        fiat_fetch_since = history_fetch_start(fiat_since, fiat_covered_from, initial_coverage)
         balances = bitkub_balances(api_key, api_secret)
         balance_response = post_ingestion(
             ingestion_url,
@@ -585,24 +612,26 @@ def lambda_handler(_event: dict[str, Any], _context: Any) -> dict[str, int | boo
 
         trades_count = ingest_history_records(
             ingestion_url, access_client_id, access_client_secret, ingestion_secret, account_id,
-            "trades", bitkub_trades(api_key, api_secret, trades_since), cycle_started_at,
+            "trades", bitkub_trades(api_key, api_secret, trades_fetch_since), trades_coverage, cycle_started_at,
         )
         crypto_transfers_count = ingest_history_records(
             ingestion_url, access_client_id, access_client_secret, ingestion_secret, account_id,
             "crypto_transfers",
             chain(
-                bitkub_crypto_transfers(api_key, api_secret, "/api/v4/crypto/deposits", "deposit", crypto_since),
-                bitkub_crypto_transfers(api_key, api_secret, "/api/v4/crypto/withdraws", "withdraw", crypto_since),
+                bitkub_crypto_transfers(api_key, api_secret, "/api/v4/crypto/deposits", "deposit", crypto_fetch_since),
+                bitkub_crypto_transfers(api_key, api_secret, "/api/v4/crypto/withdraws", "withdraw", crypto_fetch_since),
             ),
+            crypto_coverage,
             cycle_started_at,
         )
         fiat_transfers_count = ingest_history_records(
             ingestion_url, access_client_id, access_client_secret, ingestion_secret, account_id,
             "fiat_transfers",
             chain(
-                bitkub_fiat_transfers(api_key, api_secret, "/api/v4/fiat/deposit/history", "deposit", fiat_since),
-                bitkub_fiat_transfers(api_key, api_secret, "/api/v4/fiat/withdraw/history", "withdraw", fiat_since),
+                bitkub_fiat_transfers(api_key, api_secret, "/api/v4/fiat/deposit/history", "deposit", fiat_fetch_since),
+                bitkub_fiat_transfers(api_key, api_secret, "/api/v4/fiat/withdraw/history", "withdraw", fiat_fetch_since),
             ),
+            fiat_coverage,
             cycle_started_at,
         )
     except HttpStageError as error:

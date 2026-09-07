@@ -58,6 +58,26 @@ class BitkubTradeTests(unittest.TestCase):
             },
         )
 
+    def test_maps_buy_cost_without_counting_the_fee_twice(self):
+        self.assertEqual(
+            LAMBDA.map_trade(
+                {"txn_id": "buy-1", "side": "buy", "rate": "100000", "amount": "1000", "fee": "25", "credit": "5", "receive": "0.0098", "ts": 1_700_000_000},
+                "BTC_THB",
+            ),
+            {
+                "id": "buy-1",
+                "side": "buy",
+                "baseAsset": "BTC",
+                "quoteAsset": "THB",
+                "price": 100000.0,
+                "amount": 0.0098,
+                "quoteAmount": 980.0,
+                "fee": 20.0,
+                "feeAsset": "THB",
+                "executedAt": 1_700_000_000_000,
+            },
+        )
+
     def test_skips_symbol_without_order_history(self):
         with (
             patch.object(LAMBDA, "bitkub_trade_symbols", return_value={"BTC_THB"}),
@@ -90,6 +110,11 @@ class BitkubTradeTests(unittest.TestCase):
 
 
 class HistoryIngestionTests(unittest.TestCase):
+    def test_reuses_checkpoint_only_when_its_coverage_matches_the_shared_anchor(self):
+        self.assertEqual(LAMBDA.history_fetch_start(300, 100, 100), 300)
+        self.assertEqual(LAMBDA.history_fetch_start(320, 120, 100), 100)
+        self.assertEqual(LAMBDA.history_fetch_start(None, None, 100), 100)
+
     def test_chunks_large_history_and_marks_only_the_last_chunk_complete(self):
         payloads = []
 
@@ -112,6 +137,7 @@ class HistoryIngestionTests(unittest.TestCase):
                 "bitkub-main",
                 "trades",
                 records,
+                1_692_224_000_000,
                 1_700_000_000_000,
             )
 
@@ -120,6 +146,7 @@ class HistoryIngestionTests(unittest.TestCase):
         self.assertTrue(all(len(payload["records"]) <= 250 for payload in payloads))
         self.assertTrue(all(payload["complete"] is False for payload in payloads[:-1]))
         self.assertIs(payloads[-1]["complete"], True)
+        self.assertTrue(all(payload["coveredFrom"] == 1_692_224_000_000 for payload in payloads))
 
     def test_follows_every_crypto_transfer_page(self):
         responses = [

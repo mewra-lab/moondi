@@ -165,8 +165,9 @@ AWS direct D1/Cloudflare credentials. Balance and history ingestion were smoke
 tested with the read-only key on 2026-09-02. History must follow every documented
 page/cursor and be delivered in bounded, idempotent chunks; only a final complete
 chunk may advance its checkpoint. Provider retention still prevents assuming
-that the available window is complete lifetime history, so Phase 2 P&L remains
-blocked pending a verified cost-basis source for older activity. Migration 0013
+that the available window is complete lifetime history, so Phase 2 P&L requires
+the local verified-archive marker from migration 0015 before it can return an
+aggregate result. Migration 0013
 clears only the three history checkpoints once so installs affected by the
 earlier partial scan replay the provider's still-available window safely.
 
@@ -199,26 +200,36 @@ does not create, modify, delete, or expose an exchange credential.
 
 ## Phase 2 — P&L Engine
 
-1. Implement the average-cost P&L calculation (DESIGN.md §7) as a pure
-   function in `packages/shared` operating on `trades` rows for one asset,
-   so it's independently testable.
-2. Wire it into `GET /api/portfolio` — add `investedAmount`,
+1. Before enabling P&L for a historical Bitkub account, import a user-verified
+   complete archive through a local-only normalizer. It must retain only
+   normalized financial fields, use `_id` as the idempotency source, stop
+   strictly before the exact live-sync `covered_from` boundary, parse its
+   explicitly chosen export timezone, require per-record confirmation for old
+   trades whose pair is omitted, and persist the verified-import marker.
+2. Implement the average-cost P&L calculation (DESIGN.md §7) as a pure
+   function in `packages/shared` operating on normalized trades and transfers,
+   so it's independently testable. Do not convert non-THB quote pairs using a
+   current rate; withhold their P&L until a historical conversion exists.
+3. Wire it into `GET /api/portfolio` — add verified acquisition cost as
+   `investedAmount` (open cost plus the cost allocated to sold units),
    `realizedPnl`, `unrealizedPnl`, `totalPnl`, per-asset `avgCost`, to the
    response.
-3. Add `GET /api/history/value` backed by precomputed
+4. Add `GET /api/history/value` backed by precomputed
    `portfolio_value_snapshots`. Build each value from a complete balance snapshot
-   and a bounded matching price set at ingestion; retain timestamped prices for
-   asset charts and one-time historical backfill only.
-4. Add a manual "cost basis override" field for crypto that arrived via
+   and a bounded matching price set at ingestion; materialize positive per-asset
+   values for selected charts, retain timestamped prices only for held/watched/
+   alerted assets, and never join raw balance and price history on page reads.
+5. Add a manual "cost basis override" field for crypto that arrived via
    `crypto_transfers` (direction = deposit) with no matching trade — a
    simple form + a nullable `manual_cost_basis` column keyed by transfer id,
    excluded from P&L by default until filled in.
-5. Frontend: dashboard summary cards (value, invested, P&L), allocation
+6. Frontend: dashboard summary cards (value, verified asset cost, P&L), allocation
    pie/bar chart, portfolio value line chart, per-asset breakdown table.
 
-**Acceptance:** dashboard shows invested capital, realized/unrealized P&L,
-and a value-over-time chart that roughly matches what you'd calculate by
-hand from a few known trades.
+**Acceptance:** dashboard shows verified asset acquisition cost, realized/unrealized P&L,
+and a value-over-time chart that roughly matches what you'd calculate by hand
+from a few known THB trades. It withholds the total when an external deposit,
+unsupported quote, or balance reconciliation is unresolved.
 
 ---
 
@@ -237,9 +248,13 @@ hand from a few known trades.
 5. Test Thai/English, light/dark, values concealed, narrow mobile width, and
    accessibility without relying on a canvas-only interaction.
 
-Implementation note: the first card export supports allocation-only and
-current-value templates, browser image copy/download/share fallbacks, and a
-mobile bottom drawer. P&L remains intentionally unavailable.
+Implementation note: card export supports allocation-only and current-value
+templates plus a per-asset P&L template for an asset whose cost and quantity
+are verified. The P&L template lets the viewer choose the THB result, return
+percentage, or both, and always renders a local preview before copy, download,
+or share. It uses browser image copy/download/share fallbacks and a mobile
+bottom drawer; it does not expose a portfolio-wide P&L while any included
+asset is unresolved.
 
 **Acceptance:** an authenticated viewer can export a responsive, private
 portfolio image without making a public link or transmitting new portfolio data

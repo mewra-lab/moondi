@@ -13,6 +13,7 @@ worker-configuration.d.ts
 .env
 .env.*
 !.env.example
+/history/
 *.log
 __pycache__/
 *.py[cod]

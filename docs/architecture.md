@@ -65,19 +65,21 @@ collects other people's exchange credentials.
    read an account with its own read-only credential pair. Bitkub secure calls
    rejected from that egress are instead made by a dedicated AWS Lambda.
 2. The Lambda keeps Bitkub credentials in AWS Parameter Store SecureString,
-   reads per-data-type D1 checkpoints through a protected API endpoint, fetches
+   reads per-data-type D1 checkpoints and immutable coverage starts through a protected API endpoint, fetches
    only documented read-only data, normalizes it, and posts bounded balance,
    trade, crypto-transfer, and fiat-transfer payloads back to that endpoint.
    The endpoint requires a separate shared HMAC secret, a fresh timestamp, and
    a single-use nonce recorded in D1 before it writes data or advances a
    checkpoint. History may arrive in multiple idempotent chunks; only a final
-   complete chunk advances the monotonic checkpoint.
-3. The API Worker stores balance snapshots, price snapshots, normalized
-   activity, sync-health events, and a complete per-account value for each
-   30-minute interval in D1. It never accepts raw Bitkub payloads or direct D1
+   complete chunk advances the monotonic checkpoint and preserves its original
+   coverage start.
+3. The API Worker stores sparse balance snapshots (positive assets plus THB),
+   prices only for held/watched/alerted assets, normalized activity, sync-health
+   events, and complete per-account and per-asset values for each 30-minute
+   interval in D1. It never accepts raw Bitkub payloads or direct D1
    credentials from AWS.
 4. The API Worker reads the latest indexed snapshot for current holdings and the
-   compact value-summary table for the portfolio chart. Asset-price history uses
+   compact value-summary tables for portfolio and selected-asset charts. Asset-price history uses
    indexed time ranges and KV caching. Page visits never call an exchange or
    recompute portfolio values across raw history.
 5. The PWA requests API data only after Cloudflare Access has authenticated the

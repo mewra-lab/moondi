@@ -29,7 +29,7 @@ API key.
 | --- | --- | --- |
 | Bitkub balance snapshots | Available | Uses a read-only API key in the sync Worker. |
 | Current THB valuation | Available | Holdings × latest available THB price, including THB cash. |
-| Portfolio-value history | Available | Historical balance snapshots valued with matching recorded prices. Incomplete points are excluded rather than shown incorrectly. |
+| Portfolio-value history | Available | Portfolio and positive per-asset values are materialized per interval. Incomplete points are excluded rather than shown incorrectly. |
 | Per-asset price trend | Available | Uses collected Bitkub prices; it starts after the installation has collected data. |
 | Activity ledger | Available when the exchange endpoint is authorized | Normalized trade and transfer data; check Sync health for endpoint status. |
 | PWA push notifications | Available | Per-device controls for synchronized activity, price-target alerts, and sync issues, where supported by the browser. |
@@ -37,7 +37,7 @@ API key.
 | Account scope, watchlist, allocation targets, target comparison, overview visibility | Available | Reads normalized values and stores personal browser preferences only; target comparison cannot trade or instruct trades. |
 | Multiple Bitkub accounts | Available | Each local account has its own read-only Worker-secret credential mapping; scopes can show one account or the combined view. |
 | JSON backup | Available | Downloads a bounded, normalized one-year export; it excludes credentials and raw exchange payloads. |
-| Cost basis / realized or unrealized P&L | Not implemented | Requires complete, reliable trade and fiat-transfer history. |
+| Bitkub cost basis / realized and unrealized P&L | Available after verified archive import | Average cost per Bitkub account for THB-quoted trades. External crypto deposits need a manual total THB cost basis; unsupported pairs, missing history, and mismatched quantities are withheld. |
 | Buying, selling, or withdrawals | Intentionally unsupported | Moondi is read-only by design. |
 | Binance | Planned | The adapter seam exists; no production adapter is included. |
 

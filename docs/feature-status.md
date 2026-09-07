@@ -62,7 +62,7 @@ Neither action deletes or reveals the Bitkub credential. If you revoked the
 key in Bitkub, replace that account's entry in the complete Worker-side
 `BITKUB_ACCOUNTS_JSON` secret before reconnecting.
 
-### Portfolio-value history
+### Portfolio-value and invested-value history
 
 The history chart values each recorded balance snapshot with prices no more
 than 35 minutes from that balance. Balance and public-price jobs may arrive in
@@ -70,13 +70,26 @@ either order; each attempts to materialize the latest complete snapshot. If a
 non-THB asset has no matching price, Moondi excludes that chart point. Showing
 only the THB portion would falsely look like a loss.
 
+For assets included in this browser’s P&L Settings and marked **Ready**, the
+chart also draws **invested value**: their remaining average-cost basis at each
+value snapshot. It includes only the selected position cost; it excludes THB
+cash, ignored assets, closed cost basis, and any asset whose history or cost
+cannot be verified. This is not a realized-P&L line or an all-portfolio result
+when the viewer has excluded assets.
+
+The selected current-value series comes from per-asset values materialized at
+ingestion. D1 stores positive balance rows plus THB as the complete-snapshot
+marker, and persists price history only for assets that are held, watched, or
+used by an active alert. This avoids rewriting every zero-balance asset and
+every Bitkub ticker on each scheduled run.
+
 Consequences:
 
 - a fresh installation has no history until syncs have collected both balances
   and prices;
 - a temporary price-sync failure can create a gap rather than an invented
   value; and
-- the chart is a valuation series, not a P&L chart.
+- the chart is a valuation and selected-position-cost series, not a P&L chart.
 
 ### Per-asset 24-hour trends
 
@@ -103,9 +116,10 @@ Bitkub event.
 
 Bitkub requires an individual symbol for each order-history request and retains
 only a bounded history window. The secure sync therefore polls every active
-exchange symbol rather than inferring symbols from current holdings. Activity
-older than the provider window may still be unavailable, which is why cost
-basis and P&L remain disabled.
+exchange symbol rather than inferring symbols from current holdings. For an
+account with a complete user-verified archive, the local archive normalizer can
+import the older normalized records before the retained window without storing
+the raw source payload or its bank/address fields.
 
 ### Account scopes and backup
 
@@ -125,15 +139,43 @@ previous 365 days, capped at 5,000 records per collection. It deliberately
 excludes API keys, push endpoints, and raw exchange payloads. Use a D1 backup
 for a complete operational recovery backup.
 
-## Deliberately unavailable
+## Conditional financial calculation
 
-### Cost basis and P&L
+### Bitkub cost basis and P&L
 
-Moondi does not yet calculate principal, average cost, realized P&L, unrealized
-P&L, or tax figures. These require complete trade history plus reliable THB
-deposit/withdrawal history. External crypto deposits also need an explicit
-cost-basis method. Until all of that is available, showing a number would be
-misleading.
+Moondi calculates verified asset acquisition cost, average cost, realized P&L, and
+unrealized P&L only after that Bitkub account has a verified local archive
+whose cutoff exactly meets all three live-history coverage boundaries, and
+every relevant asset can be reconciled to the latest balance
+snapshot. It accepts THB-quoted trades only. A non-THB pair is not converted
+using a current exchange rate, because that would invent a historical cost
+basis. The short-lived P&L cache prevents repeated dashboard reads from
+rescanning lifetime ledger rows; balance, history, and cost-basis updates
+invalidate it.
+
+The API field `investedAmount` is this verified acquisition cost: remaining
+open cost plus cost allocated to units already sold. It is not THB deposits
+minus withdrawals; fiat transfers remain account cash-flow history only.
+
+An incoming crypto transfer from outside Bitkub remains excluded until you set
+its **total THB cost basis**. Withdrawals carry cost out of Bitkub and do not
+create realized P&L. If a required cost basis, quote conversion, or balance
+reconciliation is missing, Moondi withholds aggregate P&L and explains the
+affected asset. A positive balance without normalized history is also withheld.
+These values are personal accounting estimates, not tax or investment advice.
+
+The Bitkub P&L panel is shown on Overview by default and can be hidden in
+Settings. It opens on assets still held, while closed positions stay available
+on demand because their realized P&L remains useful. The panel can scope the
+view to held assets, closed positions, items requiring review, all assets, or
+a selected set of assets. A number shown for a selected view covers only that
+view; it is not labelled as portfolio-wide P&L if another asset remains
+unresolved. Ready rows show remaining cost basis, average buy price, current value, realized and
+unrealized P&L, total P&L, and **return on cost**. Return on cost divides total
+P&L by the cost represented by the selected position (including the cost of a
+position already sold); it is not a 24-hour price move or leveraged return.
+External deposit cost-basis fields are collapsed until opened because each
+transfer needs its own historical THB cost.
 
 ### Trading and withdrawals
 
@@ -148,11 +190,14 @@ the authenticated device. They do not create a public share link, anonymous
 route, or server-side copy of the card. The default template is
 allocation-only and hides absolute values, quantities, account labels, and
 transactions. You can explicitly choose a template that includes the current
-estimated value. Copying, sharing, and downloading use browser APIs; where an
-API is unavailable, Moondi falls back to downloading the PNG.
+estimated value. For any one asset whose cost and quantity are verified, you
+can instead choose a P&L card and select whether it shows the THB P&L, return
+on cost percentage, or both. The dialog always renders a local preview before
+copying, sharing, or downloading. Copying, sharing, and downloading use browser
+APIs; where an API is unavailable, Moondi falls back to downloading the PNG.
 
-The card never represents profit/loss. A P&L template remains unavailable
-until complete, verified trade history and cost-basis data exist.
+A P&L card is deliberately per asset and is not offered for assets with missing
+cost basis, missing history, an unsupported quote, or a balance mismatch.
 
 ## Sync-health meanings
 
@@ -173,7 +218,6 @@ exposes raw exchange payloads, API keys, or secrets.
 
 ## Roadmap guardrails
 
-P&L work begins only after history endpoints have been independently verified
-with sanitized fixtures and a real read-only smoke test. A future feature must
-not weaken the rule that exchange credentials stay server-side and are never
-returned to the browser.
+P&L depends on a user-verified complete archive, sanitized-fixture tests, and
+a real read-only smoke test. A future feature must not weaken the rule that
+exchange credentials stay server-side and are never returned to the browser.

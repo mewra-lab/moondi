@@ -178,15 +178,16 @@ export const mapBitkubOrder = (order: BitkubOrder, quoteAsset: string, raw: unkn
   }
 
   const price = asNumber(order.rate)
-  const fee = asNumber(order.fee)
+  const reportedFee = asNumber(order.fee)
   const creditedFee = asNumber(order.credit ?? 0)
+  const fee = Math.max(reportedFee - creditedFee, 0)
   const orderAmount = asNumber(order.amount)
   const baseAmount = order.side === 'buy'
     ? order.receive === undefined
-      ? (orderAmount - Math.max(fee - creditedFee, 0)) / price
+      ? (orderAmount - fee) / price
       : asNumber(order.receive)
     : orderAmount
-  const quoteAmount = order.side === 'buy' ? orderAmount : baseAmount * price
+  const quoteAmount = baseAmount * price
 
   if (!Number.isFinite(baseAmount) || baseAmount < 0 || price <= 0) {
     throw new Error(`Invalid Bitkub order quantities for ${order.txn_id}`)

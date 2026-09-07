@@ -1,7 +1,7 @@
 import { Hono, type Context } from 'hono'
 import { cors } from 'hono/cors'
 import { createFactory } from 'hono/factory'
-import { portfolioValueAt, type PriceQuote } from '@moondi/shared'
+import { calculateAverageCostHistory, calculateAverageCostPnl, calculateOpenCostBasisHistory, portfolioAssetValuesAt, type PnlResult, type PriceQuote } from '@moondi/shared'
 import { createAwsBitkubRoutes } from './aws-bitkub-routes'
 
 type HonoEnv = {
@@ -17,6 +17,7 @@ type AccountRow = {
 
 type HoldingRow = {
   account_id: string
+  account_exchange: string
   account_label: string
   asset: string
   available: number
@@ -40,11 +41,19 @@ type TransactionRow = {
 }
 
 type ValueHistoryRow = {
+  invested_value: number | null
+  selected_value: number | null
   snapshot_at: number
   total_value: number
 }
 
+type SelectedAssetValueRow = {
+  interval: number
+  selected_value: number
+}
+
 type PriceHistoryRow = {
+  average_cost?: number | null
   snapshot_at: number
   price: number
 }
@@ -123,6 +132,45 @@ type AllocationTargetRow = {
   updated_at: number
 }
 
+type PnlTradeRow = {
+  account_id: string
+  id: string
+  side: 'buy' | 'sell'
+  base_asset: string
+  quote_asset: string
+  price: number
+  amount: number
+  quote_amount: number | null
+  fee: number
+  fee_asset: string | null
+  executed_at: number
+}
+
+type PnlCryptoTransferRow = {
+  account_id: string
+  id: string
+  direction: 'deposit' | 'withdraw'
+  asset: string
+  amount: number
+  fee: number
+  executed_at: number
+  total_cost_thb: number | null
+}
+
+type CostBasisOverrideRow = {
+  id: string
+  account_id: string
+}
+
+type PnlArchiveRow = {
+  account_id: string
+  archive_before: number | null
+  history_coverage_boundary_count: number
+  history_coverage_count: number
+  latest_history_coverage_start: number | null
+  verified_at: number | null
+}
+
 type AwsBalanceIngestion = {
   accountId: string
   balances: Array<{
@@ -138,6 +186,7 @@ type AwsHistoryDataType = 'trades' | 'crypto_transfers' | 'fiat_transfers'
 type AwsHistoryIngestion = {
   accountId: string
   complete: boolean
+  coveredFrom: number
   dataType: AwsHistoryDataType
   records: Array<Record<string, unknown>>
   syncAt: number
@@ -158,6 +207,7 @@ type PriceCacheRow = {
 const portfolioHistoryPriceToleranceMs = 35 * 60 * 1_000
 const valueHistoryCacheSeconds = 5 * 60
 const priceHistoryCacheSeconds = 5 * 60
+const pnlCacheSeconds = 5 * 60
 
 const defaultPushNotificationPreferences: PushNotificationPreferences = {
   cryptoTransfers: true,
@@ -232,6 +282,7 @@ const getHoldings = async (db: D1Database, accountId?: string): Promise<HoldingR
   const query = `
     SELECT
       balances.account_id,
+      accounts.exchange AS account_exchange,
       accounts.label AS account_label,
       balances.asset,
       balances.available,
@@ -255,6 +306,102 @@ const getHoldings = async (db: D1Database, accountId?: string): Promise<HoldingR
   return result.results
 }
 
+const missingArchivePnl = (accountIds: string[]): PnlResult => ({
+  assets: [],
+  complete: false,
+  historyComplete: false,
+  investedAmount: null,
+  missingCostBasis: [],
+  missingHistoryAccounts: accountIds,
+  realizedPnl: null,
+  totalPnl: null,
+  unrealizedPnl: null,
+})
+
+const getPnlArchiveScope = async (db: D1Database, accountId?: string): Promise<PnlArchiveRow[]> => {
+  const statement = db.prepare(`
+    SELECT
+      accounts.id AS account_id,
+      imports.archive_before,
+      imports.verified_at,
+      COUNT(DISTINCT state.covered_from) AS history_coverage_boundary_count,
+      COUNT(DISTINCT CASE WHEN state.covered_from IS NOT NULL THEN state.data_type END) AS history_coverage_count,
+      MAX(state.covered_from) AS latest_history_coverage_start
+    FROM accounts
+    LEFT JOIN bitkub_pnl_archive_imports AS imports ON imports.account_id = accounts.id
+    LEFT JOIN sync_state AS state
+      ON state.account_id = accounts.id
+      AND state.data_type IN ('trades', 'crypto_transfers', 'fiat_transfers')
+    WHERE accounts.exchange = 'bitkub' AND accounts.archived_at IS NULL ${accountId ? 'AND accounts.id = ?' : ''}
+    GROUP BY accounts.id, imports.archive_before, imports.verified_at
+    ORDER BY accounts.id
+  `)
+  const result = await (accountId ? statement.bind(accountId) : statement).all<PnlArchiveRow>()
+  return result.results
+}
+
+const getBitkubPnl = async (db: D1Database, holdings: HoldingRow[], archiveScope: PnlArchiveRow[], accountId?: string): Promise<PnlResult> => {
+  const activeAccountIds = archiveScope.map((account) => account.account_id)
+  const scopeClause = accountId ? 'AND id = ?' : ''
+  const scopeBindings = accountId ? [accountId] : []
+  const results = await db.batch([
+    db.prepare(`
+      WITH scoped_accounts AS (SELECT id FROM accounts WHERE exchange = 'bitkub' AND archived_at IS NULL ${scopeClause})
+      SELECT source.account_id, source.id, source.side, source.base_asset, source.quote_asset, source.price, source.amount, source.quote_amount, source.fee, source.fee_asset, source.executed_at
+      FROM scoped_accounts
+      JOIN sync_state AS completed ON completed.account_id = scoped_accounts.id AND completed.data_type = 'trades'
+      JOIN trades AS source ON source.account_id = scoped_accounts.id
+        AND source.executed_at <= completed.last_synced_at
+      ORDER BY source.account_id, source.executed_at, source.id
+    `).bind(...scopeBindings),
+    db.prepare(`
+      WITH scoped_accounts AS (SELECT id FROM accounts WHERE exchange = 'bitkub' AND archived_at IS NULL ${scopeClause})
+      SELECT source.account_id, source.id, source.direction, source.asset, source.amount, source.fee, source.executed_at, cost_basis.total_cost_thb
+      FROM scoped_accounts
+      JOIN sync_state AS completed ON completed.account_id = scoped_accounts.id AND completed.data_type = 'crypto_transfers'
+      JOIN crypto_transfers AS source ON source.account_id = scoped_accounts.id
+        AND source.executed_at <= completed.last_synced_at
+      LEFT JOIN crypto_transfer_cost_basis AS cost_basis ON cost_basis.transfer_id = source.id
+      ORDER BY source.account_id, source.executed_at, source.id
+    `).bind(...scopeBindings),
+  ])
+  const [tradeResult, transferResult] = results
+  const trades = (tradeResult?.results ?? []) as PnlTradeRow[]
+  const transfers = (transferResult?.results ?? []) as PnlCryptoTransferRow[]
+
+  return calculateAverageCostPnl({
+    cryptoTransfers: transfers.map((transfer) => ({
+      accountId: transfer.account_id,
+      amount: transfer.amount,
+      asset: transfer.asset,
+      direction: transfer.direction,
+      executedAt: transfer.executed_at,
+      fee: transfer.fee,
+      id: transfer.id,
+    })),
+    holdings: holdings.filter((holding) => holding.account_exchange === 'bitkub' && activeAccountIds.includes(holding.account_id)).map((holding) => ({
+      accountId: holding.account_id,
+      amount: holding.available + holding.reserved,
+      asset: holding.asset,
+      price: holding.price,
+    })),
+    overrides: transfers.flatMap((transfer) => transfer.total_cost_thb === null ? [] : [{ totalCostThb: transfer.total_cost_thb, transferId: transfer.id }]),
+    trades: trades.map((trade) => ({
+      accountId: trade.account_id,
+      amount: trade.amount,
+      baseAsset: trade.base_asset,
+      executedAt: trade.executed_at,
+      fee: trade.fee,
+      ...(trade.fee_asset === null ? {} : { feeAsset: trade.fee_asset }),
+      id: trade.id,
+      price: trade.price,
+      ...(trade.quote_amount === null ? {} : { quoteAmount: trade.quote_amount }),
+      quoteAsset: trade.quote_asset,
+      side: trade.side,
+    })),
+  })
+}
+
 const getValueHistory = async (db: D1Database, from: number, to: number, accountId?: string): Promise<ValueHistoryRow[]> => {
   const query = `
     WITH scoped_accounts AS (
@@ -273,7 +420,7 @@ const getValueHistory = async (db: D1Database, from: number, to: number, account
       WHERE values_by_account.snapshot_at >= ?1 AND values_by_account.snapshot_at <= ?2
       GROUP BY values_by_account.interval
     )
-    SELECT snapshot_at, total_value
+    SELECT snapshot_at, total_value, NULL AS invested_value, NULL AS selected_value
     FROM interval_portfolio_values AS portfolio
     WHERE account_count = (
       SELECT COUNT(*) FROM scoped_accounts
@@ -285,18 +432,134 @@ const getValueHistory = async (db: D1Database, from: number, to: number, account
   return result.results
 }
 
-const valueHistoryCacheKey = (from: number, to: number, accountId?: string): string => (
-  `value-history:v3:${accountId ?? 'all'}:${from}:${to}`
+const getSelectedAssetValueHistory = async (db: D1Database, from: number, to: number, assets: string[], accountId?: string): Promise<Map<number, number>> => {
+  if (assets.length === 0) return new Map()
+  const placeholders = assets.map(() => '?').join(', ')
+  const scopeClause = accountId ? 'AND id = ?' : ''
+  const firstInterval = Math.floor(from / 1_800_000)
+  const lastInterval = Math.floor(to / 1_800_000)
+  const result = await db.prepare(`
+    WITH scoped_accounts AS (
+      SELECT id FROM accounts
+      WHERE exchange = 'bitkub' AND archived_at IS NULL ${scopeClause}
+    )
+    SELECT values_by_account.interval, SUM(values_by_account.value) AS selected_value
+    FROM portfolio_asset_value_snapshots AS values_by_account
+    JOIN scoped_accounts ON scoped_accounts.id = values_by_account.account_id
+    WHERE values_by_account.interval >= ? AND values_by_account.interval <= ?
+      AND values_by_account.asset IN (${placeholders})
+    GROUP BY values_by_account.interval
+  `).bind(...(accountId ? [accountId] : []), firstInterval, lastInterval, ...assets).all<SelectedAssetValueRow>()
+  return new Map(result.results.map((row) => [row.interval, row.selected_value]))
+}
+
+const getOpenCostBasisHistory = async (db: D1Database, points: ValueHistoryRow[], assets: string[], accountId?: string): Promise<Array<number | null> | null> => {
+  if (assets.length === 0 || points.length === 0) return null
+  const placeholders = assets.map(() => '?').join(', ')
+  const scopeClause = accountId ? 'AND id = ?' : ''
+  const scopeBindings = accountId ? [accountId] : []
+  const assetBindings = [...scopeBindings, ...assets]
+  const [tradeResult, transferResult] = await db.batch([
+    db.prepare(`
+      WITH scoped_accounts AS (SELECT id FROM accounts WHERE exchange = 'bitkub' AND archived_at IS NULL ${scopeClause})
+      SELECT source.account_id, source.id, source.side, source.base_asset, source.quote_asset, source.price, source.amount, source.quote_amount, source.fee, source.fee_asset, source.executed_at
+      FROM scoped_accounts
+      JOIN sync_state AS completed ON completed.account_id = scoped_accounts.id AND completed.data_type = 'trades'
+      JOIN trades AS source ON source.account_id = scoped_accounts.id
+        AND source.executed_at <= completed.last_synced_at
+      WHERE source.base_asset IN (${placeholders})
+      ORDER BY source.account_id, source.executed_at, source.id
+    `).bind(...assetBindings),
+    db.prepare(`
+      WITH scoped_accounts AS (SELECT id FROM accounts WHERE exchange = 'bitkub' AND archived_at IS NULL ${scopeClause})
+      SELECT source.account_id, source.id, source.direction, source.asset, source.amount, source.fee, source.executed_at, cost_basis.total_cost_thb
+      FROM scoped_accounts
+      JOIN sync_state AS completed ON completed.account_id = scoped_accounts.id AND completed.data_type = 'crypto_transfers'
+      JOIN crypto_transfers AS source ON source.account_id = scoped_accounts.id
+        AND source.executed_at <= completed.last_synced_at
+      LEFT JOIN crypto_transfer_cost_basis AS cost_basis ON cost_basis.transfer_id = source.id
+      WHERE source.asset IN (${placeholders})
+      ORDER BY source.account_id, source.executed_at, source.id
+    `).bind(...assetBindings),
+  ])
+  const trades = (tradeResult?.results ?? []) as PnlTradeRow[]
+  const transfers = (transferResult?.results ?? []) as PnlCryptoTransferRow[]
+  return calculateOpenCostBasisHistory({
+    assets,
+    cryptoTransfers: transfers.map((transfer) => ({
+      accountId: transfer.account_id,
+      amount: transfer.amount,
+      asset: transfer.asset,
+      direction: transfer.direction,
+      executedAt: transfer.executed_at,
+      fee: transfer.fee,
+      id: transfer.id,
+    })),
+    overrides: transfers.flatMap((transfer) => transfer.total_cost_thb === null ? [] : [{ totalCostThb: transfer.total_cost_thb, transferId: transfer.id }]),
+    snapshots: points.map((point) => point.snapshot_at),
+    trades: trades.map((trade) => ({
+      accountId: trade.account_id,
+      amount: trade.amount,
+      baseAsset: trade.base_asset,
+      executedAt: trade.executed_at,
+      fee: trade.fee,
+      ...(trade.fee_asset === null ? {} : { feeAsset: trade.fee_asset }),
+      id: trade.id,
+      price: trade.price,
+      ...(trade.quote_amount === null ? {} : { quoteAmount: trade.quote_amount }),
+      quoteAsset: trade.quote_asset,
+      side: trade.side,
+    })),
+  })
+}
+
+const getHistoricalAverageCost = async (db: D1Database, asset: string, snapshots: number[], accountId?: string): Promise<Array<number | null>> => {
+  if (snapshots.length === 0) return []
+  const scopeClause = accountId ? 'AND id = ?' : ''
+  const bindings = accountId ? [accountId] : []
+  const [tradeResult, transferResult] = await db.batch([
+    db.prepare(`WITH scoped_accounts AS (SELECT id FROM accounts WHERE exchange = 'bitkub' AND archived_at IS NULL ${scopeClause})
+      SELECT source.account_id, source.id, source.side, source.base_asset, source.quote_asset, source.price, source.amount, source.quote_amount, source.fee, source.fee_asset, source.executed_at
+      FROM scoped_accounts JOIN sync_state AS completed ON completed.account_id = scoped_accounts.id AND completed.data_type = 'trades'
+      JOIN trades AS source ON source.account_id = scoped_accounts.id AND source.executed_at <= completed.last_synced_at
+      WHERE source.base_asset = ? ORDER BY source.account_id, source.executed_at, source.id`).bind(...bindings, asset),
+    db.prepare(`WITH scoped_accounts AS (SELECT id FROM accounts WHERE exchange = 'bitkub' AND archived_at IS NULL ${scopeClause})
+      SELECT source.account_id, source.id, source.direction, source.asset, source.amount, source.fee, source.executed_at, cost_basis.total_cost_thb
+      FROM scoped_accounts JOIN sync_state AS completed ON completed.account_id = scoped_accounts.id AND completed.data_type = 'crypto_transfers'
+      JOIN crypto_transfers AS source ON source.account_id = scoped_accounts.id AND source.executed_at <= completed.last_synced_at
+      LEFT JOIN crypto_transfer_cost_basis AS cost_basis ON cost_basis.transfer_id = source.id
+      WHERE source.asset = ? ORDER BY source.account_id, source.executed_at, source.id`).bind(...bindings, asset),
+  ])
+  const trades = (tradeResult?.results ?? []) as PnlTradeRow[]
+  const transfers = (transferResult?.results ?? []) as PnlCryptoTransferRow[]
+  return calculateAverageCostHistory({
+    asset,
+    cryptoTransfers: transfers.map((record) => ({ accountId: record.account_id, amount: record.amount, asset: record.asset, direction: record.direction, executedAt: record.executed_at, fee: record.fee, id: record.id })),
+    overrides: transfers.flatMap((record) => record.total_cost_thb === null ? [] : [{ totalCostThb: record.total_cost_thb, transferId: record.id }]),
+    snapshots,
+    trades: trades.map((record) => ({ accountId: record.account_id, amount: record.amount, baseAsset: record.base_asset, executedAt: record.executed_at, fee: record.fee, ...(record.fee_asset === null ? {} : { feeAsset: record.fee_asset }), id: record.id, price: record.price, ...(record.quote_amount === null ? {} : { quoteAmount: record.quote_amount }), quoteAsset: record.quote_asset, side: record.side })),
+  })
+}
+
+const valueHistoryCacheKey = async (from: number, to: number, accountId: string | undefined, assets: string[], costBasisRevision: string): Promise<string> => (
+  `value-history:v8:${await sha256Hex(`${accountId ?? 'all'}:${[...assets].sort().join(',')}:${costBasisRevision}:${from}:${to}`)}`
 )
 
-const getCachedValueHistory = async (env: Env, from: number, to: number, accountId?: string): Promise<ValueHistoryRow[]> => {
-  const key = valueHistoryCacheKey(from, to, accountId)
+const getCachedValueHistory = async (env: Env, from: number, to: number, accountId: string | undefined, assets: string[], costBasisRevision?: string): Promise<ValueHistoryRow[]> => {
+  const key = await valueHistoryCacheKey(from, to, accountId, assets, costBasisRevision ?? 'unavailable')
   if (typeof env.CACHE.get === 'function') {
     const cached = await env.CACHE.get<ValueHistoryRow[]>(key, 'json')
     if (Array.isArray(cached)) return cached
   }
 
-  const points = await getValueHistory(env.DB, from, to, accountId)
+  const valuePoints = await getValueHistory(env.DB, from, to, accountId)
+  const investedValues = costBasisRevision ? await getOpenCostBasisHistory(env.DB, valuePoints, assets, accountId) : null
+  const selectedValues = await getSelectedAssetValueHistory(env.DB, from, to, assets, accountId)
+  const points = valuePoints.map((point, index) => ({
+    ...point,
+    invested_value: investedValues?.[index] ?? null,
+    selected_value: assets.length > 0 ? (selectedValues.get(Math.floor(point.snapshot_at / 1_800_000)) ?? 0) : null,
+  }))
   if (typeof env.CACHE.put === 'function') {
     await env.CACHE.put(key, JSON.stringify(points), { expirationTtl: valueHistoryCacheSeconds })
   }
@@ -354,6 +617,62 @@ const sha256Hex = async (value: string): Promise<string> => Array.from(
   new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value))),
   (byte) => byte.toString(16).padStart(2, '0'),
 ).join('')
+
+const pnlRevisionKey = (accountId: string): string => `bitkub-pnl:revision:v1:${accountId}`
+
+const invalidateBitkubPnl = async (cache: KVNamespace, accountId: string, updatedAt: number): Promise<void> => {
+  if (typeof cache.put === 'function') await cache.put(pnlRevisionKey(accountId), `${updatedAt}:${crypto.randomUUID()}`)
+}
+
+const getCachedBitkubPnl = async (env: Env, holdings: HoldingRow[], accountId?: string): Promise<{ pnl: PnlResult, revision: string }> => {
+  const archiveScope = await getPnlArchiveScope(env.DB, accountId)
+  const missingHistoryAccounts = archiveScope
+    .filter((account) => (
+      !Number.isSafeInteger(account.archive_before)
+      || !Number.isSafeInteger(account.verified_at)
+      || account.history_coverage_boundary_count !== 1
+      || account.history_coverage_count !== 3
+      || !Number.isSafeInteger(account.latest_history_coverage_start)
+      || account.latest_history_coverage_start !== account.archive_before
+    ))
+    .map((account) => account.account_id)
+  if (missingHistoryAccounts.length > 0) return { pnl: missingArchivePnl(missingHistoryAccounts), revision: 'unavailable' }
+  if (archiveScope.length === 0) return {
+    pnl: calculateAverageCostPnl({ cryptoTransfers: [], holdings: [], overrides: [], trades: [] }),
+    revision: 'empty',
+  }
+
+  const revisions = typeof env.CACHE.get === 'function'
+    ? await Promise.all(archiveScope.map((account) => env.CACHE.get(pnlRevisionKey(account.account_id))))
+    : archiveScope.map(() => null)
+  const latestHoldingUpdate = holdings
+    .filter((holding) => holding.account_exchange === 'bitkub')
+    .reduce((latest, holding) => Math.max(latest, holding.updated_at ?? 0), 0)
+  const fingerprint = await sha256Hex(JSON.stringify({
+    accountId: accountId ?? 'all',
+    archiveScope: archiveScope.map((account) => [
+      account.account_id,
+      account.archive_before,
+      account.verified_at,
+      account.history_coverage_boundary_count,
+      account.history_coverage_count,
+      account.latest_history_coverage_start,
+    ]),
+    latestHoldingUpdate,
+    revisions,
+  }))
+  const key = `bitkub-pnl:v4:${fingerprint}`
+  if (typeof env.CACHE.get === 'function') {
+    const cached = await env.CACHE.get<PnlResult>(key, 'json')
+    if (cached && typeof cached === 'object' && Array.isArray(cached.assets) && typeof cached.complete === 'boolean') {
+      return { pnl: cached, revision: fingerprint }
+    }
+  }
+
+  const pnl = await getBitkubPnl(env.DB, holdings, archiveScope, accountId)
+  if (typeof env.CACHE.put === 'function') await env.CACHE.put(key, JSON.stringify(pnl), { expirationTtl: pnlCacheSeconds })
+  return { pnl, revision: fingerprint }
+}
 
 const priceHistoryCacheKey = async (assets: string[], from: number, to: number): Promise<string> => {
   const digest = await sha256Hex(`${[...assets].sort().join(',')}:${from}:${to}`)
@@ -455,6 +774,7 @@ const parseAwsBalanceIngestion = (value: unknown): AwsBalanceIngestion | undefin
   ) return undefined
 
   const normalizedBalances: AwsBalanceIngestion['balances'] = []
+  const seenAssets = new Set<string>()
   for (const balance of balances) {
     if (typeof balance !== 'object' || balance === null) return undefined
     const asset = Reflect.get(balance, 'asset')
@@ -469,9 +789,13 @@ const parseAwsBalanceIngestion = (value: unknown): AwsBalanceIngestion | undefin
       || typeof reserved !== 'number'
       || !Number.isFinite(reserved)
       || reserved < 0
+      || seenAssets.has(asset)
     ) return undefined
+    seenAssets.add(asset)
     normalizedBalances.push({ asset, available, reserved })
   }
+
+  if (!seenAssets.has('THB')) return undefined
 
   return { accountId, balances: normalizedBalances, snapshotAt }
 }
@@ -481,6 +805,7 @@ const parseAwsHistoryIngestion = (value: unknown): AwsHistoryIngestion | undefin
 
   const accountId = Reflect.get(value, 'accountId')
   const complete = Reflect.get(value, 'complete')
+  const coveredFrom = Reflect.get(value, 'coveredFrom')
   const dataType = Reflect.get(value, 'dataType')
   const records = Reflect.get(value, 'records')
   const syncAt = Reflect.get(value, 'syncAt')
@@ -488,12 +813,15 @@ const parseAwsHistoryIngestion = (value: unknown): AwsHistoryIngestion | undefin
     typeof accountId !== 'string'
     || !/^[A-Za-z0-9_-]{1,128}$/.test(accountId)
     || typeof complete !== 'boolean'
+    || !Number.isSafeInteger(coveredFrom)
+    || coveredFrom <= 0
     || (dataType !== 'trades' && dataType !== 'crypto_transfers' && dataType !== 'fiat_transfers')
     || !Array.isArray(records)
     || records.length > awsIngestionMaxHistoryRecords
     || (!complete && records.length === 0)
     || !Number.isSafeInteger(syncAt)
     || syncAt <= 0
+    || coveredFrom > syncAt
   ) return undefined
 
   const normalizedRecords: Array<Record<string, unknown>> = []
@@ -501,7 +829,7 @@ const parseAwsHistoryIngestion = (value: unknown): AwsHistoryIngestion | undefin
     if (typeof record !== 'object' || record === null || Array.isArray(record)) return undefined
     normalizedRecords.push(record as Record<string, unknown>)
   }
-  return { accountId, complete, dataType, records: normalizedRecords, syncAt }
+  return { accountId, complete, coveredFrom, dataType, records: normalizedRecords, syncAt }
 }
 
 const authenticatedAwsIngestion = async (c: Context<HonoEnv>): Promise<AwsAuthenticatedIngestion | Response> => {
@@ -573,27 +901,42 @@ const ingestAwsBalances = async (c: Context<HonoEnv>) => {
     `).bind(...assets).all<PriceCacheRow>()
     priceRows.push(...result.results)
   }
-  const totalValue = portfolioValueAt(
+  const assetValues = portfolioAssetValuesAt(
     payload.balances,
     priceRows.map<PriceQuote>((price) => ({ asset: price.asset, price: price.price, quote: 'THB', updatedAt: price.updated_at })),
     payload.snapshotAt,
     portfolioHistoryPriceToleranceMs,
   )
+  const interval = Math.floor(payload.snapshotAt / 1_800_000)
+  const persistedBalances = payload.balances.filter((balance) => balance.asset === 'THB' || balance.available + balance.reserved > 0)
+  const totalValue = assetValues?.reduce((total, asset) => total + asset.value, 0)
 
   await c.env.DB.batch([
-    ...payload.balances.map((balance) => c.env.DB.prepare(
+    ...persistedBalances.map((balance) => c.env.DB.prepare(
       'INSERT INTO balance_snapshots (account_id, asset, available, reserved, snapshot_at) VALUES (?, ?, ?, ?, ?)',
     ).bind(payload.accountId, balance.asset, balance.available, balance.reserved, payload.snapshotAt)),
     c.env.DB.prepare('INSERT INTO sync_events (account_id, data_type, status, detail, occurred_at) VALUES (?, ?, ?, ?, ?)')
       .bind(payload.accountId, 'balances', 'success', 'AWS Bitkub ingestion', payload.snapshotAt),
-    ...(totalValue === undefined ? [] : [c.env.DB.prepare(`
+    ...(totalValue === undefined || assetValues === undefined ? [] : [
+      c.env.DB.prepare('DELETE FROM portfolio_asset_value_snapshots WHERE account_id = ? AND interval = ?').bind(payload.accountId, interval),
+      c.env.DB.prepare(`
       INSERT INTO portfolio_value_snapshots (account_id, interval, snapshot_at, total_value)
       VALUES (?, ?, ?, ?)
       ON CONFLICT(account_id, interval) DO UPDATE SET
         snapshot_at = excluded.snapshot_at,
         total_value = excluded.total_value
-    `).bind(payload.accountId, Math.floor(payload.snapshotAt / 1_800_000), payload.snapshotAt, totalValue)]),
+    `).bind(payload.accountId, interval, payload.snapshotAt, totalValue),
+      ...assetValues.map((asset) => c.env.DB.prepare(`
+        INSERT INTO portfolio_asset_value_snapshots (account_id, asset, interval, snapshot_at, quantity, value)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(account_id, asset, interval) DO UPDATE SET
+          snapshot_at = excluded.snapshot_at,
+          quantity = excluded.quantity,
+          value = excluded.value
+      `).bind(payload.accountId, asset.asset, interval, payload.snapshotAt, asset.quantity, asset.value)),
+    ]),
   ])
+  await invalidateBitkubPnl(c.env.CACHE, payload.accountId, payload.snapshotAt)
 
   return c.json({ ingested: true, snapshotAt: payload.snapshotAt })
 }
@@ -637,8 +980,12 @@ const insertAwsHistoryRecord = (db: D1Database, accountId: string, dataType: Aws
       INSERT INTO trades (id, account_id, external_id, side, base_asset, quote_asset, price, amount, quote_amount, fee, fee_asset, executed_at, raw_json)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(account_id, external_id) DO UPDATE SET
-        quote_amount = COALESCE(excluded.quote_amount, trades.quote_amount)
-      WHERE trades.quote_amount IS NULL AND excluded.quote_amount IS NOT NULL
+        amount = excluded.amount,
+        fee = excluded.fee,
+        fee_asset = excluded.fee_asset,
+        price = excluded.price,
+        quote_amount = excluded.quote_amount
+      WHERE excluded.quote_amount IS NOT NULL
     `).bind(awsHistoryRecordId(accountId, externalId), accountId, externalId, side, baseAsset, quoteAsset, price, amount, quoteAmount ?? null, fee, feeAsset ?? null, executedAt, storedRawJson)
   }
 
@@ -684,13 +1031,23 @@ const getAwsSyncState = async (c: Context<HonoEnv>) => {
   if (!await claimAwsIngestionNonce(c.env.DB, authenticated.nonce, authenticated.timestamp)) return c.json({ error: 'Replay rejected' }, 409)
 
   const checkpoints = await c.env.DB.prepare(
-    `SELECT data_type, last_synced_at FROM sync_state WHERE account_id = ? AND data_type IN ('trades', 'crypto_transfers', 'fiat_transfers')`,
-  ).bind(accountId).all<{ data_type: AwsHistoryDataType, last_synced_at: number }>()
-  const byType = new Map(checkpoints.results.map((row) => [row.data_type, row.last_synced_at]))
+    `SELECT data_type, last_synced_at, covered_from FROM sync_state WHERE account_id = ? AND data_type IN ('trades', 'crypto_transfers', 'fiat_transfers')`,
+  ).bind(accountId).all<{ covered_from: number | null, data_type: AwsHistoryDataType, last_synced_at: number }>()
+  const byType = new Map(checkpoints.results.map((row) => [row.data_type, row]))
+  const checkpoint = (dataType: AwsHistoryDataType): number | null => {
+    const row = byType.get(dataType)
+    return row?.covered_from == null ? null : row.last_synced_at
+  }
+  const coverage = (dataType: AwsHistoryDataType): number | null => byType.get(dataType)?.covered_from ?? null
+  const coverageValues = checkpoints.results.flatMap((row) => row.covered_from === null ? [] : [row.covered_from])
   return c.json({
-    cryptoTransfersSince: byType.get('crypto_transfers') ?? null,
-    fiatTransfersSince: byType.get('fiat_transfers') ?? null,
-    tradesSince: byType.get('trades') ?? null,
+    cryptoTransfersCoveredFrom: coverage('crypto_transfers'),
+    cryptoTransfersSince: checkpoint('crypto_transfers'),
+    fiatTransfersCoveredFrom: coverage('fiat_transfers'),
+    fiatTransfersSince: checkpoint('fiat_transfers'),
+    historyCoverageAnchor: coverageValues.length === 0 ? null : Math.min(...coverageValues),
+    tradesCoveredFrom: coverage('trades'),
+    tradesSince: checkpoint('trades'),
   })
 }
 
@@ -714,16 +1071,21 @@ const ingestAwsHistory = async (c: Context<HonoEnv>) => {
   if (inserts.some((statement) => statement === undefined)) return c.json({ error: 'Invalid ingestion payload' }, 400)
   const completionStatements = payload.complete ? [
     c.env.DB.prepare(`
-      INSERT INTO sync_state (account_id, data_type, last_synced_at, cursor)
-      VALUES (?, ?, ?, NULL)
+      INSERT INTO sync_state (account_id, data_type, last_synced_at, covered_from, cursor)
+      VALUES (?, ?, ?, ?, NULL)
       ON CONFLICT(account_id, data_type) DO UPDATE SET
         last_synced_at = MAX(sync_state.last_synced_at, excluded.last_synced_at),
+        covered_from = CASE
+          WHEN sync_state.covered_from IS NULL THEN excluded.covered_from
+          ELSE MIN(sync_state.covered_from, excluded.covered_from)
+        END,
         cursor = NULL
-    `).bind(payload.accountId, payload.dataType, payload.syncAt),
+    `).bind(payload.accountId, payload.dataType, payload.syncAt, payload.coveredFrom),
     c.env.DB.prepare('INSERT INTO sync_events (account_id, data_type, status, detail, occurred_at) VALUES (?, ?, ?, ?, ?)')
       .bind(payload.accountId, payload.dataType, 'success', 'AWS Bitkub ingestion', payload.syncAt),
   ] : []
   await c.env.DB.batch([...(inserts as D1PreparedStatement[]), ...completionStatements])
+  if (payload.complete) await invalidateBitkubPnl(c.env.CACHE, payload.accountId, payload.syncAt)
   return c.json({ complete: payload.complete, dataType: payload.dataType, ingested: true, recordCount: payload.records.length, syncAt: payload.syncAt })
 }
 
@@ -992,6 +1354,50 @@ const restoreAccount = async (c: Context<HonoEnv>) => {
   return c.json({ ok: true })
 }
 
+const validTransferId = (value: string): boolean => /^[A-Za-z0-9._:-]{1,512}$/.test(value)
+
+const saveCryptoTransferCostBasis = async (c: Context<HonoEnv>) => {
+  const transferId = c.req.param('transferId')
+  const body = await readRequestBody(c.req.raw)
+  const rawTotalCostThb = body ? Reflect.get(body, 'totalCostThb') : undefined
+  const totalCostThb = (typeof rawTotalCostThb === 'number' || (typeof rawTotalCostThb === 'string' && rawTotalCostThb.trim() !== ''))
+    ? Number(rawTotalCostThb)
+    : Number.NaN
+  if (!transferId || !validTransferId(transferId) || !Number.isFinite(totalCostThb) || totalCostThb < 0 || totalCostThb > 1e15) {
+    return c.json({ error: 'Invalid cost basis' }, 400)
+  }
+  const transfer = await c.env.DB.prepare(`
+    SELECT source.id, source.account_id
+    FROM crypto_transfers AS source
+    JOIN accounts ON accounts.id = source.account_id
+    WHERE source.id = ? AND source.direction = 'deposit' AND accounts.exchange = 'bitkub' AND accounts.archived_at IS NULL
+  `).bind(transferId).first<CostBasisOverrideRow>()
+  if (!transfer) return c.json({ error: 'Incoming Bitkub transfer not found' }, 404)
+  const updatedAt = Date.now()
+  await c.env.DB.prepare(`
+    INSERT INTO crypto_transfer_cost_basis (transfer_id, total_cost_thb, updated_at)
+    VALUES (?, ?, ?)
+    ON CONFLICT(transfer_id) DO UPDATE SET total_cost_thb = excluded.total_cost_thb, updated_at = excluded.updated_at
+  `).bind(transfer.id, totalCostThb, updatedAt).run()
+  await invalidateBitkubPnl(c.env.CACHE, transfer.account_id, updatedAt)
+  return c.json({ costBasis: { totalCostThb, transferId: transfer.id, updatedAt } })
+}
+
+const removeCryptoTransferCostBasis = async (c: Context<HonoEnv>) => {
+  const transferId = c.req.param('transferId')
+  if (!transferId || !validTransferId(transferId)) return c.json({ error: 'Invalid cost basis' }, 400)
+  const transfer = await c.env.DB.prepare(`
+    SELECT source.account_id
+    FROM crypto_transfers AS source
+    JOIN accounts ON accounts.id = source.account_id
+    WHERE source.id = ? AND source.direction = 'deposit' AND accounts.exchange = 'bitkub' AND accounts.archived_at IS NULL
+  `).bind(transferId).first<{ account_id: string }>()
+  if (!transfer) return c.json({ error: 'Incoming Bitkub transfer not found' }, 404)
+  await c.env.DB.prepare('DELETE FROM crypto_transfer_cost_basis WHERE transfer_id = ?').bind(transferId).run()
+  await invalidateBitkubPnl(c.env.CACHE, transfer.account_id, Date.now())
+  return c.json({ ok: true })
+}
+
 const pushTestCooldownSeconds = 60
 const manualSyncCooldownSeconds = 15 * 60
 
@@ -1150,28 +1556,50 @@ const api = factory
   .delete('/allocation-targets/:asset', removeAllocationTarget)
   .post('/accounts/:accountId/archive', archiveAccount)
   .post('/accounts/:accountId/restore', restoreAccount)
+  .put('/cost-basis-overrides/:transferId', saveCryptoTransferCostBasis)
+  .delete('/cost-basis-overrides/:transferId', removeCryptoTransferCostBasis)
   .get('/portfolio', async (c) => {
     const accountId = c.req.query('account')
     const holdings = await getHoldings(c.env.DB, accountId)
     const totalValue = holdings.reduce((total, holding) => total + (holding.available + holding.reserved) * holding.price, 0)
-    return c.json({ holdings, totalValue, updatedAt: holdings.reduce<number | null>((latest, holding) => Math.max(latest ?? 0, holding.updated_at ?? 0) || null, null) })
+    const { pnl } = await getCachedBitkubPnl(c.env, holdings, accountId)
+    return c.json({ holdings, pnl, totalValue, updatedAt: holdings.reduce<number | null>((latest, holding) => Math.max(latest ?? 0, holding.updated_at ?? 0) || null, null) })
   })
   .get('/portfolio/:accountId', async (c) => {
     const accountId = c.req.param('accountId')
     const holdings = await getHoldings(c.env.DB, accountId)
     const totalValue = holdings.reduce((total, holding) => total + (holding.available + holding.reserved) * holding.price, 0)
-    return c.json({ accountId, holdings, totalValue })
+    const { pnl } = await getCachedBitkubPnl(c.env, holdings, accountId)
+    return c.json({ accountId, holdings, pnl, totalValue })
   })
   .get('/history/value', async (c) => {
     const { from, to } = historyBounds(c.req.query('from'), c.req.query('to'), c.req.query('days'))
-    return c.json({ points: await getCachedValueHistory(c.env, from, to, c.req.query('account')) })
+    const accountId = c.req.query('account')
+    const assets = normalizeAssets(c.req.query('assets'))
+    let costBasisRevision: string | undefined
+    if (assets.length > 0) {
+      const holdings = await getHoldings(c.env.DB, accountId)
+      const { pnl, revision } = await getCachedBitkubPnl(c.env, holdings, accountId)
+      const byAsset = new Map(pnl.assets.map((asset) => [asset.asset, asset]))
+      if (pnl.historyComplete && assets.every((asset) => byAsset.get(asset)?.status === 'ready')) costBasisRevision = revision
+    }
+    return c.json({ points: await getCachedValueHistory(c.env, from, to, accountId, assets, costBasisRevision) })
   })
   .get('/history/price/:asset', async (c) => {
     const asset = normalizeAsset(c.req.param('asset'))
     if (!asset) return c.json({ error: 'Invalid asset' }, 400)
     const { from, to } = historyBounds(c.req.query('from'), c.req.query('to'), c.req.query('days'))
     const histories = await getCachedPriceHistories(c.env, [asset], from, to)
-    return c.json({ asset, points: histories[asset] ?? [] })
+    const points = histories[asset] ?? []
+    if (c.req.query('averageCost') !== '1') return c.json({ asset, points })
+    const accountId = c.req.query('account')
+    const holdings = await getHoldings(c.env.DB, accountId)
+    const { pnl } = await getCachedBitkubPnl(c.env, holdings, accountId)
+    const averageCostAvailable = pnl.historyComplete && pnl.assets.some((candidate) => candidate.asset === asset && candidate.status === 'ready')
+    const costs = averageCostAvailable
+      ? await getHistoricalAverageCost(c.env.DB, asset, points.map((point) => point.snapshot_at), accountId)
+      : points.map(() => null)
+    return c.json({ asset, averageCostAvailable, points: points.map((point, index) => ({ ...point, average_cost: costs[index] ?? null })) })
   })
   .get('/history/prices', async (c) => {
     const assets = normalizeAssets(c.req.query('assets'))

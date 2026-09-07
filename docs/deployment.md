@@ -102,7 +102,7 @@ private exchange request—not the database or browser API—to Lambda:
 
 `EventBridge Scheduler → private Lambda → Bitkub → Cloudflare Access → API Worker → D1`.
 
-The Lambda source is [infra/aws-bitkub-sync/lambda_function.py](../infra/aws-bitkub-sync/lambda_function.py). It fetches balances, trade history, crypto transfers, and fiat transfers. Before each run it reads D1 checkpoints through an authenticated internal API route; it sends only normalized records back to the API and never sends raw Bitkub payloads or direct D1 credentials. Trade records include the base quantity, quote asset, unit price, fee, and quote amount. Bitkub reports `amount` in quote units for buys and base units for sells, so the adapter normalizes those cases before ingestion.
+The Lambda source is [infra/aws-bitkub-sync/lambda_function.py](../infra/aws-bitkub-sync/lambda_function.py). It fetches balances, trade history, crypto transfers, and fiat transfers. Before each run it reads D1 checkpoints and the earliest established shared coverage boundary through an authenticated internal API route; retries reuse that boundary for every stream. It sends only normalized records back to the API and never sends raw Bitkub payloads or direct D1 credentials. Trade records include the base quantity, quote asset, unit price, fee, and quote amount. Bitkub reports `amount` in quote units for buys and base units for sells, so the adapter normalizes those cases before ingestion. The public history APIs do not recover records archived beyond their roughly 90-day window; use the manual verified-archive workflow in [Operations](operations.md#bitkub-historical-archive-and-pnl), not the undocumented website session endpoint.
 
 Order-history discovery scans every active `source=exchange` symbol returned by
 Bitkub, including non-THB pairs such as `BTC_USDT`, and follows keyset cursors to
@@ -113,13 +113,13 @@ first complete CloudWatch result before relying on the schedule.
 
 For an existing AWS deployment, pause the EventBridge schedule during this
 protocol upgrade. Apply migrations, deploy the API Worker that understands the
-`complete` marker, update the Lambda, run one manual test, and only then resume
-the schedule. Never run the chunking Lambda against the older API because that
-API could advance a checkpoint after an intermediate chunk.
+`complete` and `coveredFrom` fields, update the Lambda, run one manual test, and
+only then resume the schedule. Never run the new Lambda against the older API
+because it cannot preserve the archive/live coverage boundary.
 
 ### 1. Prepare Cloudflare
 
-1. Apply every pending migration through `0013_rescan_exchange_history.sql`
+1. Apply every pending migration through `0017_sparse_snapshots_and_history_coverage.sql`
    using the migration command above.
 2. Set an `AWS_SYNC_INGESTION_SECRET` secret on the **API Worker**. Generate one
    random value in a password manager, paste the same value into AWS Parameter
@@ -202,7 +202,9 @@ Set these non-secret environment variables:
 
 Run one manual Lambda test with `{}`. It should return `{ "ok": true }`, log
 only record counts, and create new balance/activity records plus corresponding
-sync events in the dashboard. A `401`, `403`, or `404` from the
+sync events in the dashboard. Confirm all three history rows in `sync_state`
+have non-null, identical `covered_from` values before importing an older
+archive. A `401`, `403`, or `404` from the
 ingestion URL means the Access service-token policy or shared ingestion secret
 is not configured correctly; do not weaken Access to diagnose it.
 

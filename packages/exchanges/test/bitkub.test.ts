@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { calculateAverageCostPnl } from '@moondi/shared'
 import { BitkubAdapter, createBitkubSigner, mapBitkubBalances, mapBitkubFiatTransfers, mapBitkubOrder, mapBitkubTransfer } from '../src/bitkub/index'
 
 describe('Bitkub mapping', () => {
@@ -12,7 +13,9 @@ describe('Bitkub mapping', () => {
     expect(mapBitkubOrder({ amount: '1000', fee: '25', rate: '100000', receive: '0.00975', side: 'buy', ts: 1_700_000_000_000, txn_id: 'trade-1' }, 'BTC_THB', { source: 'fixture' })).toMatchObject({
       amount: 0.00975,
       baseAsset: 'BTC',
+      fee: 25,
       price: 100000,
+      quoteAmount: 975,
       quoteAsset: 'THB',
       side: 'buy',
     })
@@ -22,9 +25,25 @@ describe('Bitkub mapping', () => {
     expect(mapBitkubOrder({ amount: '1000', credit: '5', fee: '25', rate: '100000', side: 'buy', ts: 1_700_000_000_000, txn_id: 'trade-current' }, 'BTC_THB', { source: 'fixture' })).toMatchObject({
       amount: 0.0098,
       baseAsset: 'BTC',
-      fee: 25,
+      fee: 20,
       price: 100000,
+      quoteAmount: 980,
     })
+  })
+
+  it('feeds one all-in buy cost into P&L without adding the fee twice', () => {
+    const trade = mapBitkubOrder(
+      { amount: '1000', fee: '25', rate: '100000', receive: '0.00975', side: 'buy', ts: 1_700_000_000_000, txn_id: 'trade-1' },
+      'BTC_THB',
+      {},
+    )
+
+    expect(calculateAverageCostPnl({
+      cryptoTransfers: [],
+      holdings: [{ amount: 0.00975, asset: 'BTC', price: 100000 }],
+      overrides: [],
+      trades: [trade],
+    })).toMatchObject({ complete: true, unrealizedPnl: -25 })
   })
 
   it('keeps sell quantities in base units and derives the quote amount', () => {

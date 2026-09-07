@@ -36,20 +36,18 @@ Use three signals together:
 3. **D1 data freshness** — compare the latest snapshot timestamp with the
    expected cron cadence.
 
-For D1 quota monitoring, inspect query insights sorted by rows read. The normal
-portfolio-history path should read `portfolio_value_snapshots`; a query that
-joins `balance_snapshots` to `price_snapshots` on every page view indicates an
-outdated API deployment. Current holdings should use an indexed lookup of the
-latest timestamp per active account. Run `EXPLAIN QUERY PLAN` after changing
-either query and confirm that historical tables are searched through indexes.
-The Free-plan `5M` meter counts rows read, not HTTP requests. Migration `0012`
-adds account/time/id cursor indexes, while `0013` clears only history
-checkpoints so the corrected all-symbol pagination can replay the provider's
-available window without deleting normalized rows. Transaction filters are
-pushed into each table before the union, portfolio values are materialized, and
-bounded multi-asset price-history responses use hashed KV keys. These controls
-reduce rows scanned, but Query Insights remains the source of truth after
-deployment.
+For D1 quota monitoring, inspect both rows read and rows written. The Free plan
+meters database rows, not HTTP requests, and index maintenance also counts as
+writes. A healthy 30-minute sync stores a sparse balance snapshot (positive
+assets plus THB), persists public prices only for held, watched, or alerted
+assets, and materializes both portfolio and per-asset values. It must not write
+every Bitkub ticker or every zero balance each run. The normal history path
+reads `portfolio_value_snapshots` and `portfolio_asset_value_snapshots`; a live
+page query joining raw `balance_snapshots` to `price_snapshots` indicates an
+outdated API deployment. Use Query Insights and `EXPLAIN QUERY PLAN` after query
+changes. The exact limits and reset time are documented by Cloudflare:
+[D1 pricing](https://developers.cloudflare.com/d1/platform/pricing/) and
+[index guidance](https://developers.cloudflare.com/d1/best-practices/use-indexes/).
 
 An endpoint may be deferred while balances/prices remain healthy. Do not treat
 this as a total outage or invent missing activity from it.
@@ -89,13 +87,77 @@ export for the viewer. It is bounded to 5,000 rows per collection and is not a
 replacement for a D1 backup. It omits credentials, push endpoints, and raw
 exchange payloads.
 
+## Bitkub historical archive and P&L
+
+Keep a downloaded Bitkub history archive outside version control. The ignored
+`history/` directory is supported only as a local input. It can contain bank
+names/numbers, addresses, and transaction metadata, so never commit it or send
+it to the API.
+
+Bitkub's documented trade, crypto-transfer, and fiat-transfer APIs retain only
+the current window (about 90 days); pagination cannot retrieve the archived
+part. The website may expose downloadable history and currently uses the
+browser-authenticated request `/api/history/history-datatable`, but that route
+is not in Bitkub's public API contract. Do not call it from Lambda/Workers,
+automate a session cookie, or store its raw response in D1. Download through
+Bitkub's own UI and keep the files local.
+
+After applying migrations through `0017`, deploy the matching API and Lambda,
+then let all three history streams finish once. Migration `0017` intentionally
+clears their checkpoints so the new run records a provable `covered_from`
+boundary. If a run completes only some streams, the next run reuses the earliest
+established boundary and backfills the others from there. Query that boundary
+from D1: all three rows must be present and have the same value.
+
+```sql
+SELECT data_type, covered_from, last_synced_at
+FROM sync_state
+WHERE account_id = '<account-id>'
+  AND data_type IN ('trades', 'crypto_transfers', 'fiat_transfers')
+ORDER BY data_type;
+```
+
+Convert that exact millisecond value to a UTC ISO timestamp and use it as
+`--before`. The archive importer keeps only records strictly before the
+boundary; live sync owns records at or after it. P&L remains unavailable if the
+archive marker and all three coverage boundaries do not match exactly.
+
+Some website exports omit `symbol` on old trades. Moondi no longer assumes such
+records are THB pairs, because Bitkub also has non-THB markets. Manually verify
+each omitted pair, place only the confirmed source `_id` values in a local JSON
+array outside version control, and pass that file with
+`--confirmed-missing-symbol-ids`. Example with placeholders:
+
+```bash
+node scripts/import-bitkub-history.mjs \
+  --account "replace-with-local-account-id" \
+  --before "replace-with-exact-covered-from-UTC-ISO" \
+  --timezone +07:00 \
+  --input-dir history \
+  --last-page "replace-with-confirmed-final-page" \
+  --expected-records "replace-with-confirmed-total-records" \
+  --confirmed-missing-symbol-ids /tmp/confirmed-thb-trade-ids.json \
+  --output /tmp/moondi-bitkub-history.sql
+npx wrangler d1 execute moondi --remote --config apps/api/wrangler.jsonc --file /tmp/moondi-bitkub-history.sql
+```
+
+Back up D1 first and verify the supplied ID is an active Bitkub account. The SQL
+contains only normalized activity fields and is idempotent, but it is still
+financial data and belongs in `/tmp`, not the repository. Reload the dashboard
+afterward. P&L stays withheld for any external crypto deposit until its total
+THB cost basis is entered, whenever the reconstructed quantity does not match
+the latest Bitkub balance, or when a holding has no normalized history.
+
 ## Updating Moondi
 
 1. Read the release notes and migration list.
 2. Back up D1.
 3. Pull the release into your own repository.
 4. Run `npm run check`, `npm test`, and `npm run build`.
-5. Apply migrations once, before Workers depending on them.
+5. Apply migrations once, before Workers depending on them. Migration `0017`
+   creates sparse per-asset value materialization, removes redundant indexes,
+   and clears the three Bitkub history checkpoints so coverage can be proven.
+   P&L stays withheld until live coverage and the verified archive meet.
 6. For an existing AWS secure-sync installation, pause EventBridge, deploy the
    API, update and manually test Lambda, then resume EventBridge. Deploy the
    sync Worker and Pages afterward (the history chunk protocol must be live
