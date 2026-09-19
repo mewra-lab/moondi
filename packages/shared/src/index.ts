@@ -161,7 +161,7 @@ type PnlEvent =
   | { kind: 'trade'; record: PnlTrade }
   | { kind: 'crypto_transfer'; record: PnlCryptoTransfer }
 
-const pnlQuantityTolerance = 1e-7
+const pnlQuantityTolerance = 2e-7
 
 const finiteNonNegative = (value: number): boolean => Number.isFinite(value) && value >= 0
 
