@@ -217,6 +217,14 @@ class RecordValidationTests(unittest.TestCase):
         self.assertLessEqual(len(first["id"]), 256)
         self.assertNotIn("txHash", first)
 
+    def test_truncates_a_derived_buy_amount_to_the_credited_8_decimals(self):
+        trade = LAMBDA.map_trade(
+            {"txn_id": "buy-derived", "side": "buy", "rate": "2000.07", "amount": "500", "fee": "1.25", "ts": 1_700_000_000},
+            "SOL_THB",
+        )
+        self.assertEqual(trade["amount"], 0.24936627)
+        self.assertAlmostEqual(trade["quoteAmount"], 498.75)
+
     def test_rejects_record_ids_that_the_ingestion_api_would_reject(self):
         with self.assertRaisesRegex(RuntimeError, "invalid trade ID"):
             LAMBDA.map_trade(

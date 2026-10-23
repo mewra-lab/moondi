@@ -16,6 +16,13 @@ and this project uses semantic versioning for public releases.
   transaction pagination, request-origin enforcement, and multi-account
   portfolio snapshots.
 
+### Fixed
+
+- Buy quantities derived from Bitkub order history are truncated to the 8
+  decimals Bitkub credits (migration `0019`). Unrounded values accumulated
+  against the wallet balance across many small buys and withheld P&L as a
+  balance mismatch.
+
 ### Changed
 
 - Real Cloudflare resource configuration is no longer tracked; each installer

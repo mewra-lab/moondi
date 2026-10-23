@@ -249,8 +249,15 @@ def map_trade(order: Any, symbol: str) -> dict[str, Any]:
     credit = finite_number(order.get("credit", 0), "trade credit")
     fee = max(reported_fee - credit, 0)
     received = order.get("receive")
-    amount = order_amount if side == "sell" else (finite_number(received, "trade receive") if received is not None else (order_amount - fee) / price)
-    quote_amount = amount * price
+    derives_buy_amount = side == "buy" and received is None
+    if side == "sell":
+        amount = order_amount
+    elif received is not None:
+        amount = finite_number(received, "trade receive")
+    else:
+        # Bitkub credits a buy truncated to 8 decimals; an unrounded quotient drifts from the wallet balance.
+        amount = math.floor((order_amount - fee) / price * 1e8 + 1e-6) / 1e8
+    quote_amount = order_amount - fee if derives_buy_amount else amount * price
     if not math.isfinite(amount) or amount < 0:
         raise RuntimeError("Bitkub returned an invalid trade amount")
     return {

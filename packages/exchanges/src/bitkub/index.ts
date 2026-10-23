@@ -168,6 +168,12 @@ export const mapBitkubBalances = (balances: BitkubBalance[]): NormalizedBalance[
     reserved: asNumber(balance.reserved),
   }))
 
+// Bitkub credits a buy truncated to 8 decimals. Keeping the unrounded quotient overstates every
+// buy by up to 1e-8 and the drift accumulates against the wallet balance over many small buys.
+const baseUnitScale = 1e8
+
+const floorToBaseUnits = (value: number): number => Math.floor(value * baseUnitScale + 1e-6) / baseUnitScale
+
 export const mapBitkubOrder = (order: BitkubOrder, quoteAsset: string, raw: unknown): NormalizedTrade => {
   const separator = quoteAsset.lastIndexOf('_')
   const baseAsset = quoteAsset.slice(0, separator)
@@ -182,12 +188,13 @@ export const mapBitkubOrder = (order: BitkubOrder, quoteAsset: string, raw: unkn
   const creditedFee = asNumber(order.credit ?? 0)
   const fee = Math.max(reportedFee - creditedFee, 0)
   const orderAmount = asNumber(order.amount)
+  const derivesBuyAmount = order.side === 'buy' && order.receive === undefined
   const baseAmount = order.side === 'buy'
-    ? order.receive === undefined
-      ? (orderAmount - fee) / price
+    ? derivesBuyAmount
+      ? floorToBaseUnits((orderAmount - fee) / price)
       : asNumber(order.receive)
     : orderAmount
-  const quoteAmount = baseAmount * price
+  const quoteAmount = derivesBuyAmount ? orderAmount - fee : baseAmount * price
 
   if (!Number.isFinite(baseAmount) || baseAmount < 0 || price <= 0) {
     throw new Error(`Invalid Bitkub order quantities for ${order.txn_id}`)

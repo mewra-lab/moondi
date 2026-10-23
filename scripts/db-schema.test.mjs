@@ -113,3 +113,32 @@ test('coverage repair migration realigns checkpoints reset by migration 0017', (
     { covered_from: 100, data_type: 'trades' },
   ])
 })
+
+test('derived buy amount migration truncates only over-precise THB buys', () => {
+  const migrationsDirectory = `${repositoryRoot}db/migrations`
+  const migrationNames = readdirSync(migrationsDirectory)
+    .filter((name) => name.endsWith('.sql') && name < '0019_truncate_derived_buy_amounts.sql')
+    .toSorted()
+  const database = buildDatabase(migrationNames.map((name) => readFileSync(`${migrationsDirectory}/${name}`, 'utf8')))
+
+  database.prepare('INSERT INTO accounts (id, exchange, label, owner_email, created_at) VALUES (?, ?, ?, ?, ?)')
+    .run('bitkub-main', 'bitkub', 'Bitkub Main', 'owner@example.test', 1)
+  const insert = database.prepare(`
+    INSERT INTO trades (id, account_id, external_id, side, base_asset, quote_asset, price, amount, quote_amount, fee, fee_asset, executed_at, raw_json)
+    VALUES (?, 'bitkub-main', ?, ?, ?, 'THB', 2000.07, ?, ?, 1.25, 'THB', 1, '{}')
+  `)
+  insert.run('overprecise', 'overprecise', 'buy', 'SOL', 0.24936627218047, 498.75)
+  insert.run('exact', 'exact', 'buy', 'SOL', 0.24936627, 498.75)
+  insert.run('large-exact', 'large-exact', 'buy', 'IOST', 27000.1234567, 550.5)
+  insert.run('sell', 'sell', 'sell', 'SOL', 0.24936627218047, 498.75)
+
+  database.exec(readFileSync(`${migrationsDirectory}/0019_truncate_derived_buy_amounts.sql`, 'utf8'))
+
+  assert.deepEqual(Object.fromEntries(database.prepare('SELECT id, amount, quote_amount FROM trades').all()
+    .map(({ id, amount, quote_amount: quoteAmount }) => [id, [amount, quoteAmount]])), {
+    exact: [0.24936627, 498.75],
+    'large-exact': [27000.1234567, 550.5],
+    overprecise: [0.24936627, 498.75],
+    sell: [0.24936627218047, 498.75],
+  })
+})

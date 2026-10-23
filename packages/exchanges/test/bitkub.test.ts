@@ -31,6 +31,14 @@ describe('Bitkub mapping', () => {
     })
   })
 
+  it('truncates a derived buy amount to the 8 decimals Bitkub credits', () => {
+    expect(mapBitkubOrder({ amount: '500', fee: '1.25', rate: '2000.07', side: 'buy', ts: 1_700_000_000_000, txn_id: 'trade-derived' }, 'SOL_THB', {})).toMatchObject({
+      amount: 0.24936627,
+      fee: 1.25,
+      quoteAmount: 498.75,
+    })
+  })
+
   it('feeds one all-in buy cost into P&L without adding the fee twice', () => {
     const trade = mapBitkubOrder(
       { amount: '1000', fee: '25', rate: '100000', receive: '0.00975', side: 'buy', ts: 1_700_000_000_000, txn_id: 'trade-1' },
