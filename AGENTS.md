@@ -25,7 +25,7 @@ agent workflow rather than duplicating either document.
   binding shapes, and Wrangler syntax against installed types and schema.
 - Use the relevant installed project skills under `.agents/skills/`. For React
   work, load `vercel-react-best-practices` from `vercel-labs/agent-skills`; for
-  Hono work, load `hono` from `yusukebe/hono-skill`; for Workers and configuration,
+  Hono work, load `hono` from `honojs/skills`; for Workers and configuration,
   apply `cloudflare`, `workers-best-practices`, and `wrangler`.
 
 ## Architecture
