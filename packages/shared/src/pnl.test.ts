@@ -161,6 +161,47 @@ describe('calculateAverageCostPnl', () => {
     expect(pnl.assets).toEqual([expect.objectContaining({ asset: 'BTC', status: 'ready' })])
   })
 
+  it('accepts a partial-fill buy whose derived quantity is off by the 0.01 THB rounding of its amount', () => {
+    const buy = (id: string, amount: number, price: number, quoteAmount: number, executedAt: number) =>
+      ({ amount, baseAsset: 'SOL', executedAt, fee: 0.85, feeAsset: 'THB', id, price, quoteAmount, quoteAsset: 'THB', side: 'buy' }) as const
+    const pnl = calculateAverageCostPnl({
+      cryptoTransfers: [],
+      // The wallet was credited exactly 0.137 for the first fill, while 339.65 THB / 2479.14 derives 0.13700315.
+      holdings: [{ amount: 0.137 + 0.09125404, asset: 'SOL', price: 2480 }],
+      overrides: [],
+      trades: [buy('fill-1', 0.13700315, 2479.14, 339.65, 1), buy('fill-2', 0.09125404, 2479.89, 226.3, 1)],
+    })
+
+    expect(pnl.assets).toEqual([expect.objectContaining({ asset: 'SOL', status: 'ready' })])
+  })
+
+  it('still withholds P&L when the quantity gap is larger than the THB rounding of every buy', () => {
+    const pnl = calculateAverageCostPnl({
+      cryptoTransfers: [],
+      // 0.01 SOL at 2,480 THB is about 25 THB, far beyond the rounding of one 0.01 THB amount.
+      holdings: [{ amount: 0.13700315 - 0.01, asset: 'SOL', price: 2480 }],
+      overrides: [],
+      trades: [{ amount: 0.13700315, baseAsset: 'SOL', executedAt: 1, fee: 0.85, feeAsset: 'THB', id: 'fill', price: 2479.14, quoteAmount: 339.65, quoteAsset: 'THB', side: 'buy' }],
+    })
+
+    expect(pnl.assets).toEqual([expect.objectContaining({ asset: 'SOL', status: 'quantity_mismatch' })])
+  })
+
+  it('closes the whole position when a sale leaves only THB-rounding dust', () => {
+    const pnl = calculateAverageCostPnl({
+      cryptoTransfers: [],
+      holdings: [],
+      overrides: [],
+      trades: [
+        { amount: 0.13700315, baseAsset: 'SOL', executedAt: 1, fee: 0.85, feeAsset: 'THB', id: 'buy', price: 2479.14, quoteAmount: 339.65, quoteAsset: 'THB', side: 'buy' },
+        { amount: 0.137, baseAsset: 'SOL', executedAt: 2, fee: 0, feeAsset: 'THB', id: 'sell', price: 2500, quoteAmount: 342.5, quoteAsset: 'THB', side: 'sell' },
+      ],
+    })
+
+    expect(pnl.assets).toEqual([expect.objectContaining({ asset: 'SOL', costBasis: 0, quantity: 0, status: 'ready' })])
+    expect(pnl.realizedPnl).toBeCloseTo(342.5 - 339.65 - 0.85, 6)
+  })
+
   it('withholds P&L for a positive holding that has no normalized history', () => {
     const pnl = calculateAverageCostPnl({
       cryptoTransfers: [],

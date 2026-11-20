@@ -152,6 +152,7 @@ type PnlPosition = {
   asset: string
   cost: number
   quantity: number
+  quantityUncertainty: number
   realizedCostBasis: number
   realizedPnl: number
   reasons: Set<Exclude<PnlAssetStatus, 'ready'>>
@@ -162,6 +163,11 @@ type PnlEvent =
   | { kind: 'crypto_transfer'; record: PnlCryptoTransfer }
 
 const pnlQuantityTolerance = 2e-7
+
+// Bitkub reports a buy's THB amount and fee rounded to 0.01 and gives no credited crypto quantity,
+// so a buy's base quantity derived from them can be off by up to 0.01 THB / price (a partial fill
+// of an order is the visible case: the exchange credits the book's exact size, not THB / price).
+const pnlBuyRoundingThb = 0.01
 
 const finiteNonNegative = (value: number): boolean => Number.isFinite(value) && value >= 0
 
@@ -180,19 +186,22 @@ const pnlPosition = (positions: Map<string, PnlPosition>, accountId: string | un
   const key = pnlPositionKey(accountId, asset)
   const current = positions.get(key)
   if (current) return current
-  const created: PnlPosition = { accountId: accountId ?? '', asset, cost: 0, quantity: 0, realizedCostBasis: 0, realizedPnl: 0, reasons: new Set() }
+  const created: PnlPosition = { accountId: accountId ?? '', asset, cost: 0, quantity: 0, quantityUncertainty: 0, realizedCostBasis: 0, realizedPnl: 0, reasons: new Set() }
   positions.set(key, created)
   return created
 }
 
 const closePosition = (position: PnlPosition, amount: number): number | undefined => {
-  if (!finiteNonNegative(amount) || position.quantity + pnlQuantityTolerance < amount) {
+  const slack = pnlQuantityTolerance + position.quantityUncertainty
+  if (!finiteNonNegative(amount) || position.quantity + slack < amount) {
     position.reasons.add('quantity_mismatch')
     return undefined
   }
   if (position.quantity <= pnlQuantityTolerance) return 0
-  const cost = position.cost * amount / position.quantity
-  position.quantity -= amount
+  // A sale that leaves only rounding dust closes the whole position, so no phantom cost stays open.
+  const closedAmount = position.quantity - amount <= slack ? position.quantity : amount
+  const cost = position.cost * closedAmount / position.quantity
+  position.quantity -= closedAmount
   position.cost -= cost
   if (position.quantity <= pnlQuantityTolerance) {
     position.quantity = 0
@@ -251,6 +260,7 @@ const applyCostBasisEvent = (positions: Map<string, PnlPosition>, event: PnlEven
   }
   if (trade.side === 'buy') {
     position.quantity += trade.amount
+    if (trade.price > 0 && Number.isFinite(trade.price)) position.quantityUncertainty += pnlBuyRoundingThb / trade.price
     position.cost += quoteAmount + trade.fee
     return
   }
@@ -380,7 +390,7 @@ export const calculateAverageCostPnl = ({
     const holding = holdingsByPosition.get(pnlPositionKey(position.accountId, position.asset))
     const holdingAmount = holding?.amount ?? 0
     const tolerance = Math.max(pnlQuantityTolerance, Math.max(position.quantity, holdingAmount) * 1e-8)
-    if (Math.abs(position.quantity - holdingAmount) > tolerance) position.reasons.add('quantity_mismatch')
+    if (Math.abs(position.quantity - holdingAmount) > tolerance + position.quantityUncertainty) position.reasons.add('quantity_mismatch')
     if (holdingAmount > tolerance && (!holding || holding.price <= 0)) position.reasons.add('missing_price')
     const aggregate = byAsset.get(position.asset) ?? {
       cost: 0,
