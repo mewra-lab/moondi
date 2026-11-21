@@ -142,3 +142,62 @@ test('derived buy amount migration truncates only over-precise THB buys', () => 
     sell: [0.24936627218047, 498.75],
   })
 })
+
+test('overlap migration removes only archive records that have a live twin', () => {
+  const migrationsDirectory = `${repositoryRoot}db/migrations`
+  const migrationNames = readdirSync(migrationsDirectory)
+    .filter((name) => name.endsWith('.sql') && name < '0020_remove_overlapping_archive_records.sql')
+    .toSorted()
+  const database = buildDatabase(migrationNames.map((name) => readFileSync(`${migrationsDirectory}/${name}`, 'utf8')))
+  database.prepare('INSERT INTO accounts (id, exchange, label, owner_email, created_at) VALUES (?, ?, ?, ?, ?)')
+    .run('bitkub-main', 'bitkub', 'Bitkub Main', 'owner@example.test', 1)
+
+  const transfer = database.prepare(`
+    INSERT INTO crypto_transfers (id, account_id, external_id, direction, asset, amount, fee, tx_hash, executed_at, raw_json)
+    VALUES (?, 'bitkub-main', ?, ?, ?, ?, 0, NULL, ?, '{}')
+  `)
+  transfer.run('archive-duplicate', 'archive:1', 'withdraw', 'XAAA', 100.5, 1_000_000)
+  transfer.run('live-twin', 'LIVE1', 'withdraw', 'XAAA', 100.5, 1_038_000)
+  transfer.run('archive-unique', 'archive:2', 'withdraw', 'XAAA', 7, 2_000_000)
+  transfer.run('archive-far-from-live', 'archive:3', 'deposit', 'XAAA', 5, 3_000_000)
+  transfer.run('live-far-from-archive', 'LIVE3', 'deposit', 'XAAA', 5, 3_600_000)
+  transfer.run('archive-other-asset', 'archive:4', 'withdraw', 'XBBB', 100.5, 1_000_000)
+  transfer.run('archive-pair-a', 'archive:5', 'deposit', 'XAAA', 9, 4_000_000)
+  transfer.run('archive-pair-b', 'archive:6', 'deposit', 'XAAA', 9, 4_000_500)
+  database.prepare('INSERT INTO crypto_transfer_cost_basis (transfer_id, total_cost_thb, updated_at) VALUES (?, ?, ?)').run('archive-duplicate', 10, 1)
+  database.prepare('INSERT INTO crypto_transfer_cost_basis (transfer_id, total_cost_thb, updated_at) VALUES (?, ?, ?)').run('archive-unique', 20, 1)
+
+  const fiat = database.prepare(`
+    INSERT INTO fiat_transfers (id, account_id, external_id, direction, currency, amount, fee, executed_at, raw_json)
+    VALUES (?, 'bitkub-main', ?, 'deposit', 'THB', ?, 0, ?, '{}')
+  `)
+  fiat.run('fiat-archive-duplicate', 'archive:f1', 500, 1_000_000)
+  fiat.run('fiat-live-twin', 'LIVEF1', 500, 1_010_000)
+  fiat.run('fiat-archive-unique', 'archive:f2', 500, 5_000_000)
+
+  const trade = database.prepare(`
+    INSERT INTO trades (id, account_id, external_id, side, base_asset, quote_asset, price, amount, quote_amount, fee, fee_asset, executed_at, raw_json)
+    VALUES (?, 'bitkub-main', ?, ?, 'XAAA', 'THB', ?, ?, 100, 1, 'THB', ?, '{}')
+  `)
+  trade.run('trade-archive-duplicate', 'archive:t1', 'buy', 2.5, 40, 1_000_000)
+  trade.run('trade-live-twin', 'LIVET1', 'buy', 2.5, 40.0000001, 1_020_000)
+  trade.run('trade-archive-different-side', 'archive:t2', 'sell', 2.5, 40, 1_000_000)
+  trade.run('trade-archive-pair-a', 'archive:t3', 'sell', 3, 10, 6_000_000)
+  trade.run('trade-archive-pair-b', 'archive:t4', 'sell', 3, 10, 6_000_100)
+
+  database.exec(readFileSync(`${migrationsDirectory}/0020_remove_overlapping_archive_records.sql`, 'utf8'))
+
+  const ids = (table) => database.prepare(`SELECT id FROM ${table} ORDER BY id`).all().map(({ id }) => id)
+  assert.deepEqual(ids('crypto_transfers'), [
+    'archive-far-from-live',
+    'archive-other-asset',
+    'archive-pair-a',
+    'archive-pair-b',
+    'archive-unique',
+    'live-far-from-archive',
+    'live-twin',
+  ])
+  assert.deepEqual(database.prepare('SELECT transfer_id FROM crypto_transfer_cost_basis').all().map(({ transfer_id: id }) => id), ['archive-unique'])
+  assert.deepEqual(ids('fiat_transfers'), ['fiat-archive-unique', 'fiat-live-twin'])
+  assert.deepEqual(ids('trades'), ['trade-archive-different-side', 'trade-archive-pair-a', 'trade-archive-pair-b', 'trade-live-twin'])
+})

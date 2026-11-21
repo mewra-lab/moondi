@@ -97,6 +97,12 @@ const createdAt = (value, timezone) => {
   return timestamp
 }
 
+const liveTwinWindowMs = 120_000
+
+const nearSql = (column, value) => `ABS(${column} - ${sqlNumber(value)}) <= MAX(1e-8, ${sqlNumber(Math.abs(value))} * 1e-6)`
+
+const liveTwinSql = (table, accountId, executedAt, conditions) => `SELECT 1 FROM ${table} AS live WHERE live.account_id = ${sqlString(accountId)} AND ${conditions.join(' AND ')} AND ABS(live.executed_at - ${sqlNumber(executedAt)}) <= ${liveTwinWindowMs} AND (live.external_id IS NULL OR live.external_id NOT LIKE 'archive:%')`
+
 const archiveRecordId = (accountId, sourceId) => `${accountId.length}:${accountId}:archive:${sourceId}`
 
 const tradeSql = (row, accountId, sourceId, executedAt, confirmedMissingSymbols) => {
@@ -119,7 +125,14 @@ const tradeSql = (row, accountId, sourceId, executedAt, confirmedMissingSymbols)
   const quoteAmount = baseAmount * rate
   const externalId = `archive:${sourceId}`
   const id = archiveRecordId(accountId, sourceId)
-  return `INSERT INTO trades (id, account_id, external_id, side, base_asset, quote_asset, price, amount, quote_amount, fee, fee_asset, executed_at, raw_json) VALUES (${sqlString(id)}, ${sqlString(accountId)}, ${sqlString(externalId)}, ${sqlString(side)}, ${sqlString(baseAsset)}, 'THB', ${sqlNumber(rate)}, ${sqlNumber(baseAmount)}, ${sqlNumber(quoteAmount)}, ${sqlNumber(fee)}, 'THB', ${sqlNumber(executedAt)}, '{}') ON CONFLICT(account_id, external_id) DO NOTHING;`
+  const liveTwin = liveTwinSql('trades', accountId, executedAt, [
+    `live.side = ${sqlString(side)}`,
+    `live.base_asset = ${sqlString(baseAsset)}`,
+    `live.quote_asset = 'THB'`,
+    nearSql('live.amount', baseAmount),
+    nearSql('live.price', rate),
+  ])
+  return `INSERT INTO trades (id, account_id, external_id, side, base_asset, quote_asset, price, amount, quote_amount, fee, fee_asset, executed_at, raw_json) SELECT ${sqlString(id)}, ${sqlString(accountId)}, ${sqlString(externalId)}, ${sqlString(side)}, ${sqlString(baseAsset)}, 'THB', ${sqlNumber(rate)}, ${sqlNumber(baseAmount)}, ${sqlNumber(quoteAmount)}, ${sqlNumber(fee)}, 'THB', ${sqlNumber(executedAt)}, '{}' WHERE NOT EXISTS (${liveTwin}) ON CONFLICT(account_id, external_id) DO NOTHING;`
 }
 
 const transferSql = (row, accountId, sourceId, executedAt) => {
@@ -132,9 +145,19 @@ const transferSql = (row, accountId, sourceId, executedAt) => {
   const externalId = `archive:${sourceId}`
   const id = archiveRecordId(accountId, sourceId)
   if (asset === 'THB') {
-    return `INSERT INTO fiat_transfers (id, account_id, external_id, direction, currency, amount, fee, executed_at, raw_json) VALUES (${sqlString(id)}, ${sqlString(accountId)}, ${sqlString(externalId)}, ${sqlString(direction)}, 'THB', ${sqlNumber(amount)}, ${sqlNumber(fee)}, ${sqlNumber(executedAt)}, '{}') ON CONFLICT(account_id, external_id) DO NOTHING;`
+    const liveTwin = liveTwinSql('fiat_transfers', accountId, executedAt, [
+      `live.direction = ${sqlString(direction)}`,
+      `live.currency = 'THB'`,
+      nearSql('live.amount', amount),
+    ])
+    return `INSERT INTO fiat_transfers (id, account_id, external_id, direction, currency, amount, fee, executed_at, raw_json) SELECT ${sqlString(id)}, ${sqlString(accountId)}, ${sqlString(externalId)}, ${sqlString(direction)}, 'THB', ${sqlNumber(amount)}, ${sqlNumber(fee)}, ${sqlNumber(executedAt)}, '{}' WHERE NOT EXISTS (${liveTwin}) ON CONFLICT(account_id, external_id) DO NOTHING;`
   }
-  return `INSERT INTO crypto_transfers (id, account_id, external_id, direction, asset, amount, fee, tx_hash, executed_at, raw_json) VALUES (${sqlString(id)}, ${sqlString(accountId)}, ${sqlString(externalId)}, ${sqlString(direction)}, ${sqlString(asset)}, ${sqlNumber(amount)}, ${sqlNumber(fee)}, NULL, ${sqlNumber(executedAt)}, '{}') ON CONFLICT(account_id, external_id) DO NOTHING;`
+  const liveTwin = liveTwinSql('crypto_transfers', accountId, executedAt, [
+    `live.direction = ${sqlString(direction)}`,
+    `live.asset = ${sqlString(asset)}`,
+    nearSql('live.amount', amount),
+  ])
+  return `INSERT INTO crypto_transfers (id, account_id, external_id, direction, asset, amount, fee, tx_hash, executed_at, raw_json) SELECT ${sqlString(id)}, ${sqlString(accountId)}, ${sqlString(externalId)}, ${sqlString(direction)}, ${sqlString(asset)}, ${sqlNumber(amount)}, ${sqlNumber(fee)}, NULL, ${sqlNumber(executedAt)}, '{}' WHERE NOT EXISTS (${liveTwin}) ON CONFLICT(account_id, external_id) DO NOTHING;`
 }
 
 const importStateSql = (accountId, cutoff, sourceRecordCount, verifiedAt) => `
