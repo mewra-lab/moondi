@@ -4151,21 +4151,28 @@ input[type='number']::-webkit-outer-spin-button {
 }
 
 @media (max-width: 700px) {
+  :root:not([data-theme='dark']) {
+    --bg: #ffffff;
+    --topbar-bg: #ffffff;
+  }
+
+  :root {
+    --tile-bg: color-mix(in srgb, var(--ink) 5%, transparent);
+  }
+
   .app-content {
-    padding: 8px 0 calc(var(--tabbar-h) + 32px + env(safe-area-inset-bottom));
+    padding: 0 0 calc(var(--tabbar-h) + 32px + env(safe-area-inset-bottom));
   }
 
   .overview-stack,
   .overview-summary-grid {
-    gap: 10px;
+    gap: 0;
   }
 
   .hero-card {
-    border-radius: 0;
-    border-width: 0 0 1px;
-    box-shadow: none;
-    margin-top: -8px;
-    padding: 20px 16px 22px;
+    border-radius: 28px;
+    margin: 4px 12px 8px;
+    padding: 20px 18px 22px;
   }
 
   .overview-footer,
@@ -4176,33 +4183,58 @@ input[type='number']::-webkit-outer-spin-button {
 
   .holding-list {
     gap: 0;
-    margin-inline: -16px;
   }
 
   .holding {
     background: transparent;
     border-radius: 0;
     border-width: 1px 0 0;
-    padding-inline: 16px;
+    padding-inline: 0;
   }
 
-  .holding:last-child {
-    border-bottom-width: 1px;
+  .holding:first-child {
+    border-top-width: 0;
   }
 
   .mobile-ledger,
   .pnl-asset-list {
-    border-inline-width: 0;
+    border: 0;
     border-radius: 0;
-    margin-inline: -16px;
+    margin-inline: 0;
   }
 
-  .mobile-transaction {
-    padding-inline: 16px;
-  }
-
+  .mobile-transaction,
   .pnl-asset-summary {
-    padding-inline: 16px;
+    padding-inline: 0;
+  }
+
+  .mobile-transaction-values {
+    border-top: 0;
+    padding-top: 6px;
+  }
+
+  .pnl-summary > div,
+  .history-metrics > div,
+  .asset-summary > div,
+  .asset-price-metrics > div,
+  .asset-detail-cost-summary > div,
+  .asset-pnl-summary > div {
+    background: var(--tile-bg);
+    border: 0;
+    border-radius: 16px;
+  }
+
+  .asset-price-trend,
+  .asset-detail-section {
+    border-top: 0;
+    margin-top: 28px;
+    padding-top: 0;
+  }
+
+  .app-topbar {
+    --topbar-h: 64px;
+    border-bottom-color: transparent;
+    padding-block-end: 12px;
   }
 
   .app-topbar,
@@ -4289,10 +4321,6 @@ input[type='number']::-webkit-outer-spin-button {
     width: 38px;
   }
 
-  .overview-stack {
-    gap: 14px;
-  }
-
   .hero-amount {
     font-size: clamp(1.85rem, 10vw, 3.1rem);
   }
@@ -4312,8 +4340,20 @@ input[type='number']::-webkit-outer-spin-button {
     margin-bottom: 8px;
   }
 
-  .portfolio-allocation .section-heading h2 {
-    font-size: 0.96rem;
+  .section-heading h2 {
+    font-size: 1.3rem;
+  }
+
+  :root:not([data-theme='dark']) .range-tab:not(.active),
+  .range-tab:not(.active) {
+    background: var(--tile-bg);
+    border-color: transparent;
+  }
+
+  .app-content input:not([type='checkbox']):not([type='radio']),
+  .app-content .app-select {
+    background: var(--tile-bg);
+    border-color: transparent;
   }
 
   .pnl-panel,
@@ -4330,10 +4370,11 @@ input[type='number']::-webkit-outer-spin-button {
   .asset-detail,
   .empty-state,
   .error-state {
-    border-inline-width: 0;
+    background: transparent;
+    border: 0;
     border-radius: 0;
     box-shadow: none;
-    padding: 18px 16px;
+    padding: 16px;
   }
 
   .access-denied {
@@ -4567,6 +4608,6 @@ input[type='number']::-webkit-outer-spin-button {
 
 @media (display-mode: standalone) and (max-width: 1023px) {
   .app-topbar {
-    padding-block: calc(20px + var(--app-safe-top)) 10px;
+    padding-block: calc(24px + var(--app-safe-top)) 16px;
   }
 }
