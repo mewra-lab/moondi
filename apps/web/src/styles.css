@@ -1496,6 +1496,20 @@ input[type='number']::-webkit-outer-spin-button {
   grid-template-columns: minmax(180px, 1fr) minmax(140px, 180px) auto;
 }
 
+.pnl-cost-suggestion {
+  display: grid;
+  gap: 6px;
+  grid-column: 1 / -1;
+  justify-items: start;
+}
+
+.pnl-cost-suggestion p {
+  color: var(--muted);
+  font-size: 0.74rem;
+  line-height: 1.5;
+  margin: 0;
+}
+
 .pnl-details-toggle {
   margin-top: 16px;
 }

@@ -130,10 +130,17 @@ export type PnlAsset = {
   unrealizedPnl: number | null
 }
 
+export type CarriedCostSuggestion = {
+  costThb: number
+  matchedQuantity: number
+}
+
 export type MissingCostBasis = {
   amount: number
   asset: string
   executedAt: number
+  suggestedCostThb?: number
+  suggestedMatchedQuantity?: number
   transferId: string
 }
 
@@ -269,6 +276,67 @@ const applyCostBasisEvent = (positions: Map<string, PnlPosition>, event: PnlEven
   }
 }
 
+type TransitPool = { cost: number, quantity: number }
+
+export const suggestCarriedCostBasis = ({
+  cryptoTransfers,
+  overrides,
+  trades,
+}: {
+  cryptoTransfers: PnlCryptoTransfer[]
+  overrides: CostBasisOverride[]
+  trades: PnlTrade[]
+}): Map<string, CarriedCostSuggestion> => {
+  const overridesByTransfer = new Map(overrides
+    .filter((override) => finiteNonNegative(override.totalCostThb))
+    .map((override) => [override.transferId, override.totalCostThb]))
+  const positions = new Map<string, PnlPosition>()
+  const pools = new Map<string, TransitPool>()
+  const suggestions = new Map<string, CarriedCostSuggestion>()
+
+  for (const event of sortedPnlEvents(trades, cryptoTransfers)) {
+    if (event.kind !== 'crypto_transfer') {
+      applyCostBasisEvent(positions, event, overridesByTransfer)
+      continue
+    }
+
+    const transfer = event.record
+    const key = pnlPositionKey(transfer.accountId, transfer.asset)
+    if (transfer.direction === 'withdraw') {
+      const position = pnlPosition(positions, transfer.accountId, transfer.asset)
+      const quantityBefore = position.quantity
+      const costBefore = position.cost
+      const trusted = position.reasons.size === 0
+      applyCostBasisEvent(positions, event, overridesByTransfer)
+      const closedQuantity = quantityBefore - position.quantity
+      if (!trusted || position.reasons.size > 0 || !finiteNonNegative(transfer.amount) || transfer.amount <= pnlQuantityTolerance || closedQuantity <= pnlQuantityTolerance) continue
+      const carriedQuantity = Math.min(transfer.amount, closedQuantity)
+      const carriedCost = (costBefore - position.cost) * carriedQuantity / closedQuantity
+      const pool = pools.get(key) ?? { cost: 0, quantity: 0 }
+      pool.cost += carriedCost
+      pool.quantity += carriedQuantity
+      pools.set(key, pool)
+      continue
+    }
+
+    applyCostBasisEvent(positions, event, overridesByTransfer)
+    const pool = pools.get(key)
+    if (!pool || !finiteNonNegative(transfer.amount) || transfer.amount <= pnlQuantityTolerance || pool.quantity <= pnlQuantityTolerance) continue
+    const matchedQuantity = Math.min(transfer.amount, pool.quantity)
+    const costThb = pool.cost * matchedQuantity / pool.quantity
+    pool.quantity -= matchedQuantity
+    pool.cost -= costThb
+    if (pool.quantity <= pnlQuantityTolerance) {
+      pool.quantity = 0
+      pool.cost = 0
+    }
+    if (overridesByTransfer.get(transfer.id) === undefined && matchedQuantity > pnlQuantityTolerance && Number.isFinite(costThb)) {
+      suggestions.set(transfer.id, { costThb, matchedQuantity })
+    }
+  }
+  return suggestions
+}
+
 export const calculateOpenCostBasisHistory = ({
   assets,
   cryptoTransfers,
@@ -349,10 +417,18 @@ export const calculateAverageCostPnl = ({
     .map((override) => [override.transferId, override.totalCostThb]))
   const positions = new Map<string, PnlPosition>()
   const missingCostBasis: MissingCostBasis[] = []
+  const suggestions = suggestCarriedCostBasis({ cryptoTransfers, overrides, trades })
   const events = sortedPnlEvents(trades, cryptoTransfers)
   for (const event of events) {
     if (event.kind === 'crypto_transfer' && event.record.direction === 'deposit' && finiteNonNegative(event.record.amount) && overridesByTransfer.get(event.record.id) === undefined) {
-      missingCostBasis.push({ amount: event.record.amount, asset: event.record.asset, executedAt: event.record.executedAt, transferId: event.record.id })
+      const suggestion = suggestions.get(event.record.id)
+      missingCostBasis.push({
+        amount: event.record.amount,
+        asset: event.record.asset,
+        executedAt: event.record.executedAt,
+        ...(suggestion === undefined ? {} : { suggestedCostThb: suggestion.costThb, suggestedMatchedQuantity: suggestion.matchedQuantity }),
+        transferId: event.record.id,
+      })
     }
     applyCostBasisEvent(positions, event, overridesByTransfer)
   }

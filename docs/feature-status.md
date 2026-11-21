@@ -201,6 +201,16 @@ position already sold); it is not a 24-hour price move or leveraged return.
 External deposit cost-basis fields are collapsed until opened because each
 transfer needs its own historical THB cost.
 
+When coins come back to the same Bitkub account after an earlier withdrawal, a
+deposit row also shows a **suggested cost**: the average cost the withdrawn coins
+carried when they left, matched in time order against the quantity withdrawn
+earlier. It is a hint only. Nothing is saved until you press "Use suggested
+cost" (offered only when the whole deposit is matched) and then save the form.
+Moondi makes no suggestion when no earlier withdrawal matches, when the position
+still held an unresolved deposit at the time of the withdrawal, or across
+accounts; coins that were bought or swapped on another exchange in between need
+your own cost.
+
 ### Trading and withdrawals
 
 No trade, order-placement, withdrawal, or credential-management endpoint is

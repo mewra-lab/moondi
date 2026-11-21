@@ -43,6 +43,8 @@ export type MissingCostBasis = {
   amount: number
   asset: string
   executedAt: number
+  suggestedCostThb?: number
+  suggestedMatchedQuantity?: number
   transferId: string
 }
 

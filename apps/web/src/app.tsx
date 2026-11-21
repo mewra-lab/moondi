@@ -546,6 +546,15 @@ const PnlPanel = ({ ignoredAssets, language, onSaveCostBasis, pnl, valuesVisible
               <span>{transfer.asset} · <span className={valuesVisible ? undefined : 'value-concealed'}>{quantity.format(transfer.amount)}</span> · {dateTime(language).format(transfer.executedAt)}</span>
               <label><span className="sr-only">{language === 'th' ? 'ต้นทุนรวม THB' : 'Total THB cost basis'}</span><Input inputMode="decimal" min="0" onChange={(event) => setDrafts((current) => ({ ...current, [transfer.transferId]: event.target.value }))} placeholder={language === 'th' ? 'ต้นทุนรวม THB' : 'Total THB cost'} type="number" value={drafts[transfer.transferId] ?? ''} /></label>
               <button className="export-button" disabled={workingTransferId === transfer.transferId} type="submit">{workingTransferId === transfer.transferId ? (language === 'th' ? 'กำลังบันทึก…' : 'Saving…') : (language === 'th' ? 'บันทึก' : 'Save')}</button>
+              {transfer.suggestedCostThb !== undefined && transfer.suggestedMatchedQuantity !== undefined ? <CarriedCostSuggestion
+                amount={transfer.amount}
+                asset={transfer.asset}
+                costThb={transfer.suggestedCostThb}
+                language={language}
+                matchedQuantity={transfer.suggestedMatchedQuantity}
+                onUse={(value) => setDrafts((current) => ({ ...current, [transfer.transferId]: value }))}
+                valuesVisible={valuesVisible}
+              /> : null}
             </form>
             ))}
           </div> : null}
@@ -558,6 +567,35 @@ const PnlPanel = ({ ignoredAssets, language, onSaveCostBasis, pnl, valuesVisible
       </> : <p className="pnl-note">{language === 'th' ? 'ไม่มีเหรียญในมุมมองนี้' : 'No assets in this view.'}</p>}
       {message ? <p className="inline-status">{message}</p> : null}
     </section>
+  )
+}
+
+const CarriedCostSuggestion = ({ amount, asset, costThb, language, matchedQuantity, onUse, valuesVisible }: {
+  amount: number
+  asset: string
+  costThb: number
+  language: Language
+  matchedQuantity: number
+  onUse: (value: string) => void
+  valuesVisible: boolean
+}) => {
+  const money = currency(language)
+  const concealed = valuesVisible ? undefined : 'value-concealed'
+  const fullyMatched = amount - matchedQuantity <= Math.max(2e-7, amount * 1e-6)
+  return (
+    <div className="pnl-cost-suggestion">
+      <p>
+        {language === 'th' ? 'ตรงกับ ' : 'Matches '}{asset} {language === 'th' ? 'ที่เคยโอนออกจาก Bitkub ' : 'previously withdrawn from Bitkub: '}
+        <span className={concealed}>{quantity.format(matchedQuantity)}</span>
+        {fullyMatched ? '' : (language === 'th' ? ' จาก ' : ' of ')}
+        {fullyMatched ? '' : <span className={concealed}>{quantity.format(amount)}</span>}
+        {language === 'th' ? ' · ต้นทุนเดิมของส่วนนี้ ' : ' · original cost of that part '}
+        <span className={concealed}>{money.format(costThb)}</span>
+        {fullyMatched ? '' : (language === 'th' ? ' · ส่วนที่เหลือต้องระบุเอง' : ' · the rest needs your own figure')}
+      </p>
+      <p>{language === 'th' ? 'เป็นค่าประมาณจากต้นทุนเฉลี่ยตอนโอนออก ไม่ได้บันทึกให้อัตโนมัติ — ตรวจสอบก่อนบันทึก' : 'Estimated from the average cost when the coins left. Nothing is saved automatically — review it before saving.'}</p>
+      {fullyMatched ? <button className="pnl-review-toggle" onClick={() => onUse((Math.round(costThb * 100) / 100).toString())} type="button">{language === 'th' ? 'ใช้ค่าที่แนะนำ' : 'Use suggested cost'}</button> : null}
+    </div>
   )
 }
 

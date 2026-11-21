@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { calculateAverageCostHistory, calculateAverageCostPnl, calculateOpenCostBasisHistory } from './index'
+import { calculateAverageCostHistory, calculateAverageCostPnl, calculateOpenCostBasisHistory, suggestCarriedCostBasis } from './index'
 
 describe('calculateAverageCostPnl', () => {
   it('tracks only the selected assets’ remaining average-cost basis at each snapshot', () => {
@@ -241,5 +241,118 @@ describe('calculateAverageCostPnl', () => {
     })
 
     expect(pnl).toMatchObject({ complete: true, totalPnl: 0 })
+  })
+})
+
+describe('suggestCarriedCostBasis', () => {
+  const buy = { amount: 100, baseAsset: 'XAAA', executedAt: 1, fee: 0, feeAsset: 'THB', id: 'buy', price: 10, quoteAmount: 1000, quoteAsset: 'THB', side: 'buy' as const }
+  const withdraw = (id: string, executedAt: number, amount: number, fee = 0) => ({ amount, asset: 'XAAA', direction: 'withdraw' as const, executedAt, fee, id })
+  const deposit = (id: string, executedAt: number, amount: number) => ({ amount, asset: 'XAAA', direction: 'deposit' as const, executedAt, fee: 0, id })
+
+  it('carries the average cost of withdrawn coins to the matching deposit', () => {
+    const suggestions = suggestCarriedCostBasis({
+      cryptoTransfers: [withdraw('out', 2, 40), deposit('back', 3, 40)],
+      overrides: [],
+      trades: [buy],
+    })
+
+    expect(suggestions.get('back')).toEqual({ costThb: 400, matchedQuantity: 40 })
+  })
+
+  it('counts the withdrawal fee as quantity that left the position', () => {
+    const suggestions = suggestCarriedCostBasis({
+      cryptoTransfers: [withdraw('out', 2, 39, 1), deposit('back', 3, 39)],
+      overrides: [],
+      trades: [buy],
+    })
+
+    expect(suggestions.get('back')).toEqual({ costThb: 390, matchedQuantity: 39 })
+  })
+
+  it('matches only the quantity that was previously withdrawn', () => {
+    const suggestions = suggestCarriedCostBasis({
+      cryptoTransfers: [withdraw('out', 2, 10), deposit('back', 3, 25)],
+      overrides: [],
+      trades: [buy],
+    })
+
+    expect(suggestions.get('back')).toEqual({ costThb: 100, matchedQuantity: 10 })
+  })
+
+  it('prices a later withdrawal from the real position cost after an earlier return', () => {
+    const suggestions = suggestCarriedCostBasis({
+      cryptoTransfers: [withdraw('out-1', 2, 50), deposit('back-1', 3, 50), withdraw('out-2', 4, 20), deposit('back-2', 5, 20)],
+      overrides: [{ totalCostThb: 600, transferId: 'back-1' }],
+      trades: [buy],
+    })
+
+    expect(suggestions.has('back-1')).toBe(false)
+    expect(suggestions.get('back-2')).toEqual({ costThb: 220, matchedQuantity: 20 })
+  })
+
+  it('does not trust a withdrawal made while the position still has an uncosted deposit', () => {
+    const suggestions = suggestCarriedCostBasis({
+      cryptoTransfers: [deposit('outside', 2, 10), withdraw('out', 3, 40), deposit('back', 4, 40)],
+      overrides: [],
+      trades: [buy],
+    })
+
+    expect(suggestions.size).toBe(0)
+  })
+
+  it('does not suggest a cost when nothing was withdrawn first', () => {
+    const suggestions = suggestCarriedCostBasis({
+      cryptoTransfers: [deposit('outside', 3, 5)],
+      overrides: [],
+      trades: [buy],
+    })
+
+    expect(suggestions.size).toBe(0)
+  })
+
+  it('lets a deposit that already has a cost basis use up withdrawn coins without suggesting for it', () => {
+    const suggestions = suggestCarriedCostBasis({
+      cryptoTransfers: [withdraw('out', 2, 40), deposit('known', 3, 10), deposit('back', 4, 40)],
+      overrides: [{ totalCostThb: 55, transferId: 'known' }],
+      trades: [buy],
+    })
+
+    expect(suggestions.has('known')).toBe(false)
+    expect(suggestions.get('back')).toEqual({ costThb: 300, matchedQuantity: 30 })
+  })
+
+  it('splits one withdrawal across several returning deposits', () => {
+    const suggestions = suggestCarriedCostBasis({
+      cryptoTransfers: [withdraw('out', 2, 40), deposit('back-1', 3, 15), deposit('back-2', 4, 25)],
+      overrides: [],
+      trades: [buy],
+    })
+
+    expect(suggestions.get('back-1')).toEqual({ costThb: 150, matchedQuantity: 15 })
+    expect(suggestions.get('back-2')).toEqual({ costThb: 250, matchedQuantity: 25 })
+  })
+
+  it('never moves coins between accounts', () => {
+    const suggestions = suggestCarriedCostBasis({
+      cryptoTransfers: [{ ...withdraw('out', 2, 40), accountId: 'a' }, { ...deposit('back', 3, 40), accountId: 'b' }],
+      overrides: [],
+      trades: [{ ...buy, accountId: 'a' }],
+    })
+
+    expect(suggestions.size).toBe(0)
+  })
+
+  it('attaches the suggestion to the matching missing cost basis entry', () => {
+    const result = calculateAverageCostPnl({
+      cryptoTransfers: [withdraw('out', 2, 40), deposit('back', 3, 40)],
+      holdings: [{ amount: 100, asset: 'XAAA', price: 12 }],
+      overrides: [],
+      trades: [buy],
+    })
+
+    expect(result.missingCostBasis).toEqual([
+      { amount: 40, asset: 'XAAA', executedAt: 3, suggestedCostThb: 400, suggestedMatchedQuantity: 40, transferId: 'back' },
+    ])
+    expect(result.complete).toBe(false)
   })
 })

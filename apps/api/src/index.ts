@@ -662,7 +662,7 @@ const getCachedBitkubPnl = async (env: Env, holdings: HoldingRow[], accountId?: 
     latestHoldingUpdate,
     revisions,
   }))
-  const key = `bitkub-pnl:v4:${fingerprint}`
+  const key = `bitkub-pnl:v5:${fingerprint}`
   if (typeof env.CACHE.get === 'function') {
     const cached = await env.CACHE.get<PnlResult>(key, 'json')
     if (cached && typeof cached === 'object' && Array.isArray(cached.assets) && typeof cached.complete === 'boolean') {
