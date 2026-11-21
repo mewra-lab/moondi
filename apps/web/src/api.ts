@@ -216,6 +216,13 @@ export type TradeMarker = { amount: number; executed_at: number; id: string; pri
 export const loadAssetTrades = async (asset: string, from: number, accountId?: string): Promise<TradeMarker[]> =>
   (await request<{ trades: TradeMarker[] }>(`/api/history/trades/${encodeURIComponent(asset)}?from=${from}${scopedQuery(accountId)}`)).trades
 
+export type TradeSummarySide = { count: number; firstAt: number; lastAt: number; quantity: number; thb: number }
+
+export type TradeSummary = { asset: string; buys: TradeSummarySide | null; sells: TradeSummarySide | null }
+
+export const loadAssetTradeSummary = async (asset: string, accountId?: string): Promise<TradeSummary> =>
+  request<TradeSummary>(`/api/history/trades/${encodeURIComponent(asset)}/summary${accountId ? `?account=${encodeURIComponent(accountId)}` : ''}`)
+
 export const loadAccounts = async (): Promise<Account[]> => (await request<{ accounts: Account[] }>('/api/accounts')).accounts
 
 export const loadArchivedAccounts = async (): Promise<Account[]> => (await request<{ accounts: Account[] }>('/api/accounts/archived')).accounts

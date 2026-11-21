@@ -106,6 +106,17 @@ price, and time. Markers come only from trade history already stored in D1, are
 scoped to the selected account, and are hidden while values are concealed. They
 describe what was recorded; they are not a P&L result.
 
+### Buy summary on the asset page
+
+Above the price chart, an asset's detail page summarizes every synchronized
+THB-quoted buy for the selected account scope: the number of buys and their date
+range, total THB invested (including THB fees), quantity bought, and the
+quantity-weighted average buy price with the current price compared against it.
+Sells, when any exist, appear as a count and the net THB received. The summary
+is calculated by the API from trade history already stored in D1. It excludes
+crypto transfers in or out, so it is a description of recorded buying, not the
+cost basis of the position you hold and not a P&L result.
+
 ### Activity and notifications
 
 The AWS secure-sync path has verified the required Bitkub history endpoints and

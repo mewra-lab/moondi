@@ -6,8 +6,8 @@ import { Input } from '@base-ui/react/input'
 import { Switch } from '@base-ui/react/switch'
 import { AppSelect } from './app-select'
 import { AssetIcon } from './asset-icon'
-import { addPriceAlert, addWatchlistAsset, apiAccessRequired, apiAccessUrl, archiveAccount, loadAccounts, loadArchivedAccounts, loadAssetPriceHistories, loadAssetPriceHistory, loadAssetTrades, loadBackup, loadDashboard, loadDcaActivity, loadPushPublicKey, loadSyncEvents, loadTransactions, loadValueHistory, removeAllocationTarget, removePriceAlert, removePushSubscription, removeWatchlistAsset, restoreAccount, saveAllocationTarget, saveCryptoTransferCostBasis, savePushSubscription, testPushDelivery } from './api'
-import type { Account, AllocationTarget, Dashboard, Holding, PnlAsset, PnlSummary as PnlSummaryData, Portfolio, PriceAlert, PriceHistoryPoint, PushNotificationPreferences, SyncEvent, SyncStatus, TradeMarker, Transaction, ValueHistoryPoint, WatchlistAsset } from './api'
+import { addPriceAlert, addWatchlistAsset, apiAccessRequired, apiAccessUrl, archiveAccount, loadAccounts, loadArchivedAccounts, loadAssetPriceHistories, loadAssetPriceHistory, loadAssetTradeSummary, loadAssetTrades, loadBackup, loadDashboard, loadDcaActivity, loadPushPublicKey, loadSyncEvents, loadTransactions, loadValueHistory, removeAllocationTarget, removePriceAlert, removePushSubscription, removeWatchlistAsset, restoreAccount, saveAllocationTarget, saveCryptoTransferCostBasis, savePushSubscription, testPushDelivery } from './api'
+import type { Account, AllocationTarget, Dashboard, Holding, PnlAsset, PnlSummary as PnlSummaryData, Portfolio, PriceAlert, PriceHistoryPoint, PushNotificationPreferences, SyncEvent, SyncStatus, TradeMarker, TradeSummary, Transaction, ValueHistoryPoint, WatchlistAsset } from './api'
 import type { DcaActivity, DcaBuy } from '@moondi/shared'
 import { DcaActivityPanel } from './dca-activity'
 import { NotificationCenter, type NotificationItem } from './notification-center'
@@ -1365,6 +1365,60 @@ const Holdings = ({ holdings, language, onDownloadBackup, onOpenPortfolioCard, o
   )
 }
 
+const AssetBuySummary = ({ accountId, asset, currentPrice, language, valuesVisible }: { accountId?: string | undefined; asset: string; currentPrice: number; language: Language; valuesVisible: boolean }) => {
+  const [feed, setFeed] = useState<{ key: string; summary: TradeSummary | null }>()
+  const feedKey = JSON.stringify([asset, accountId])
+  useEffect(() => {
+    let active = true
+    void loadAssetTradeSummary(asset, accountId)
+      .then((summary) => {
+        if (active) setFeed({ key: feedKey, summary })
+      })
+      .catch(() => {
+        if (active) setFeed({ key: feedKey, summary: null })
+      })
+    return () => { active = false }
+  }, [accountId, asset, feedKey])
+
+  const summary = feed?.key === feedKey ? feed.summary : null
+  if (!summary?.buys) return null
+  const th = language === 'th'
+  const { buys, sells } = summary
+  const money = currency(language)
+  const day = new Intl.DateTimeFormat(th ? 'th-TH' : 'en-GB', { dateStyle: 'medium' })
+  const concealed = valuesVisible ? undefined : 'value-concealed'
+  const averagePrice = buys.quantity > 0 ? buys.thb / buys.quantity : null
+  const versusAverage = averagePrice !== null && averagePrice > 0 && currentPrice > 0 ? ((currentPrice - averagePrice) / averagePrice) * 100 : null
+
+  return (
+    <div className="asset-detail-section asset-buy-summary">
+      <p className="eyebrow">{th ? 'สรุปการซื้อสะสม' : 'Buy summary'}</p>
+      <div className="asset-detail-cost-summary">
+        <div>
+          <span>{th ? 'จำนวนครั้งที่ซื้อ' : 'Number of buys'}</span>
+          <strong>{buys.count}</strong>
+          <small>{day.format(buys.firstAt)} – {day.format(buys.lastAt)}</small>
+        </div>
+        <div>
+          <span>{th ? 'ยอดลงทุนรวม' : 'Total invested'}</span>
+          <strong className={concealed}>{money.format(buys.thb)}</strong>
+        </div>
+        <div>
+          <span>{th ? 'จำนวนที่ซื้อได้' : 'Quantity bought'}</span>
+          <strong className={concealed}>{quantity.format(buys.quantity)}</strong>
+        </div>
+        <div>
+          <span>{th ? 'ราคาซื้อเฉลี่ย' : 'Average buy price'}</span>
+          <strong className={concealed}>{averagePrice === null ? '—' : money.format(averagePrice)}</strong>
+          {versusAverage !== null ? <small className={`${versusAverage >= 0 ? 'pnl-positive' : 'pnl-negative'} ${valuesVisible ? '' : 'value-concealed'}`}>{th ? 'ราคาปัจจุบัน' : 'Current price'} {versusAverage >= 0 ? '+' : ''}{versusAverage.toFixed(2)}%</small> : null}
+        </div>
+      </div>
+      {sells ? <p className={`asset-empty ${valuesVisible ? '' : 'value-concealed'}`}>{th ? `ขายแล้ว ${sells.count} ครั้ง · ได้รับสุทธิ ${money.format(sells.thb)}` : `${sells.count} sells · ${money.format(sells.thb)} received net of fees`}</p> : null}
+      <p className="asset-empty">{th ? 'คิดจากรายการซื้อคู่ THB ที่ซิงก์แล้ว รวมค่าธรรมเนียม ไม่รวมเหรียญที่โอนเข้าหรือออก และไม่ใช่กำไรขาดทุน' : 'Based on synced THB-quoted buys, including fees. Excludes transfers in or out and is not a P&L figure.'}</p>
+    </div>
+  )
+}
+
 const AssetDetail = ({ accountId, asset, holdings, language, onClose, pnlAsset, portfolioValue, transactions, valuesVisible }: { accountId?: string | undefined; asset: string; holdings: Holding[]; language: Language; onClose: () => void; pnlAsset: PnlAsset | undefined; portfolioValue: number; transactions: Transaction[]; valuesVisible: boolean }) => {
   const assetHoldings = holdings.filter((holding) => holding.asset === asset)
   const assetTransactions = transactions.filter((transaction) => transaction.asset === asset)
@@ -1424,6 +1478,7 @@ const AssetDetail = ({ accountId, asset, holdings, language, onClose, pnlAsset, 
           ? (language === 'th' ? 'มีเหรียญโอนเข้าจากภายนอกที่ยังไม่ระบุต้นทุน จึงยังคำนวณ P&L ของเหรียญนี้ไม่ได้' : 'An external crypto transfer still needs its cost basis, so this asset’s P&L is withheld.')
           : (language === 'th' ? 'ยอดคงเหลือหรือประวัติการเทรดยังตรวจสอบไม่ครบ จึงยังไม่แสดง P&L' : 'The balance or trade history is not yet verifiable, so P&L is withheld.')}</p>}
       </div> : null}
+      <AssetBuySummary accountId={accountId} asset={asset} currentPrice={currentPrice} language={language} valuesVisible={valuesVisible} />
       <AssetPriceTrend accountId={accountId} asset={asset} averageCost={pnlAsset?.status === 'ready' ? pnlAsset.averageCost : null} language={language} valuesVisible={valuesVisible} />
       <div className="asset-detail-section">
         <h2 className="asset-subheading">{language === 'th' ? 'ยอดคงเหลือรายบัญชี' : 'Account balances'}</h2>

@@ -716,6 +716,7 @@ const awsIngestionMaxHistoryRecords = 250
 const maxAssetsPerQuery = 96
 const maxTradeMarkers = 1_000
 
+type TradeSummaryRow = { fee_total: number; first_at: number; last_at: number; quantity: number; quote_total: number; side: 'buy' | 'sell'; trade_count: number }
 type TradeMarkerRow = { amount: number; executed_at: number; id: string; price: number; side: 'buy' | 'sell' }
 
 const verifyAwsIngestion = async (secret: string, timestamp: string, nonce: string, body: string, signature: string): Promise<boolean> => {
@@ -1648,6 +1649,41 @@ const api = factory
       ? await getHistoricalAverageCost(c.env.DB, asset, points.map((point) => point.snapshot_at), accountId)
       : points.map(() => null)
     return c.json({ asset, averageCostAvailable, points: points.map((point, index) => ({ ...point, average_cost: costs[index] ?? null })) })
+  })
+  .get('/history/trades/:asset/summary', async (c) => {
+    const asset = normalizeAsset(c.req.param('asset'))
+    if (!asset) return c.json({ error: 'Invalid asset' }, 400)
+    const accountId = c.req.query('account')
+    const bindings: string[] = accountId ? [asset, accountId] : [asset]
+    const result = await c.env.DB.prepare(`
+      SELECT
+        trades.side AS side,
+        COUNT(*) AS trade_count,
+        SUM(trades.amount) AS quantity,
+        SUM(COALESCE(trades.quote_amount, trades.price * trades.amount)) AS quote_total,
+        SUM(CASE WHEN trades.fee_asset = 'THB' OR trades.fee = 0 THEN trades.fee ELSE 0 END) AS fee_total,
+        MIN(trades.executed_at) AS first_at,
+        MAX(trades.executed_at) AS last_at
+      FROM trades
+      JOIN accounts ON accounts.id = trades.account_id
+      WHERE accounts.archived_at IS NULL
+        AND trades.base_asset = ?
+        AND trades.quote_asset = 'THB'
+        ${accountId ? 'AND trades.account_id = ?' : ''}
+      GROUP BY trades.side
+    `).bind(...bindings).all<TradeSummaryRow>()
+    const side = (name: 'buy' | 'sell') => {
+      const row = result.results.find((candidate) => candidate.side === name)
+      if (!row) return null
+      return {
+        count: row.trade_count,
+        firstAt: row.first_at,
+        lastAt: row.last_at,
+        quantity: row.quantity,
+        thb: name === 'buy' ? row.quote_total + row.fee_total : row.quote_total - row.fee_total,
+      }
+    }
+    return c.json({ asset, buys: side('buy'), sells: side('sell') })
   })
   .get('/history/trades/:asset', async (c) => {
     const asset = normalizeAsset(c.req.param('asset'))

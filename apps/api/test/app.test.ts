@@ -1153,6 +1153,58 @@ describe('API worker', () => {
     expect(bind).toHaveBeenCalledWith('BTC', 1_780_000_000_000, 1_780_000_300_000, 'main', 1000)
   })
 
+  it('summarizes recorded THB buys and sells for one asset across all time', async () => {
+    const all = vi.fn().mockResolvedValue({ results: [
+      { fee_total: 10, first_at: 1_780_000_000_000, last_at: 1_780_000_900_000, quantity: 1.5, quote_total: 2_990, side: 'buy', trade_count: 3 },
+      { fee_total: 2, first_at: 1_780_000_500_000, last_at: 1_780_000_500_000, quantity: 0.5, quote_total: 1_100, side: 'sell', trade_count: 1 },
+    ] })
+    const bind = vi.fn().mockReturnValue({ all })
+    const prepare = vi.fn().mockReturnValue({ bind })
+    const response = await app.request(
+      '/api/history/trades/sol/summary?account=main',
+      undefined,
+      { CACHE: {} as KVNamespace, DB: { prepare } as unknown as D1Database },
+    )
+
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toEqual({
+      asset: 'SOL',
+      buys: { count: 3, firstAt: 1_780_000_000_000, lastAt: 1_780_000_900_000, quantity: 1.5, thb: 3_000 },
+      sells: { count: 1, firstAt: 1_780_000_500_000, lastAt: 1_780_000_500_000, quantity: 0.5, thb: 1_098 },
+    })
+    const query = String(prepare.mock.calls[0]?.[0])
+    expect(query).toContain('GROUP BY trades.side')
+    expect(query).toContain("trades.quote_asset = 'THB'")
+    expect(query).toContain('accounts.archived_at IS NULL')
+    expect(query).toContain('trades.account_id = ?')
+    expect(bind).toHaveBeenCalledWith('SOL', 'main')
+  })
+
+  it('returns null sides when an asset has no recorded THB trades', async () => {
+    const all = vi.fn().mockResolvedValue({ results: [] })
+    const prepare = vi.fn().mockReturnValue({ bind: vi.fn().mockReturnValue({ all }) })
+    const response = await app.request(
+      '/api/history/trades/iost/summary',
+      undefined,
+      { CACHE: {} as KVNamespace, DB: { prepare } as unknown as D1Database },
+    )
+
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toEqual({ asset: 'IOST', buys: null, sells: null })
+  })
+
+  it('rejects an invalid asset for the trade summary without querying the database', async () => {
+    const prepare = vi.fn()
+    const response = await app.request(
+      '/api/history/trades/bad%20asset/summary',
+      undefined,
+      { CACHE: {} as KVNamespace, DB: { prepare } as unknown as D1Database },
+    )
+
+    expect(response.status).toBe(400)
+    expect(prepare).not.toHaveBeenCalled()
+  })
+
   it('rejects an invalid asset for trade markers without querying the database', async () => {
     const prepare = vi.fn()
     const response = await app.request(
