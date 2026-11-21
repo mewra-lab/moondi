@@ -4562,3 +4562,9 @@ input[type='number']::-webkit-outer-spin-button {
     gap: 5px;
   }
 }
+
+@media (display-mode: standalone) and (max-width: 1023px) {
+  .app-topbar {
+    padding-block: calc(20px + var(--app-safe-top)) 10px;
+  }
+}
