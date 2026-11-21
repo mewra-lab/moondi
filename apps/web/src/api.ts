@@ -243,6 +243,7 @@ export const restoreAccount = async (accountId: string): Promise<void> => {
 
 export type SavedCostBasis = {
   account_id: string
+  account_label: string
   amount: number
   asset: string
   executed_at: number

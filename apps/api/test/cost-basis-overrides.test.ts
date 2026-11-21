@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import app from '../src/index'
 import { createSqliteD1 } from './sqlite-d1.mjs'
 
-type SavedBody = { truncated: boolean; overrides: { account_id: string; amount: number; asset: string; executed_at: number; total_cost_thb: number; transfer_id: string; updated_at: number }[] }
+type SavedBody = { truncated: boolean; overrides: { account_id: string; account_label: string; amount: number; asset: string; executed_at: number; total_cost_thb: number; transfer_id: string; updated_at: number }[] }
 
 const setup = () => {
   const { d1, database } = createSqliteD1()
@@ -35,6 +35,13 @@ describe('saved cost bases', () => {
       ['in-3', 'XAAA', 7, 200, 80],
       ['in-1', 'XAAA', 10, 300, 12.5],
     ])
+  })
+
+  it('names the account each saved cost basis belongs to', async () => {
+    const { request } = setup()
+    const body = (await (await request('/api/cost-basis-overrides')).json()) as SavedBody
+
+    expect(body.overrides.map((row) => [row.transfer_id, row.account_label])).toEqual([['in-2', 'Main'], ['in-3', 'Second'], ['in-1', 'Main']])
   })
 
   it('leaves out archived accounts and withdrawals, and can be scoped to one account', async () => {

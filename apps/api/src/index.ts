@@ -1544,7 +1544,7 @@ const removeCryptoTransferCostBasis = async (c: Context<HonoEnv>) => {
 const listCryptoTransferCostBases = async (c: Context<HonoEnv>) => {
   const accountId = c.req.query('account')
   const statement = c.env.DB.prepare(`
-    SELECT cost_basis.transfer_id, source.account_id, source.asset, source.amount, source.executed_at, cost_basis.total_cost_thb, cost_basis.updated_at
+    SELECT cost_basis.transfer_id, source.account_id, accounts.label AS account_label, source.asset, source.amount, source.executed_at, cost_basis.total_cost_thb, cost_basis.updated_at
     FROM crypto_transfer_cost_basis AS cost_basis
     JOIN crypto_transfers AS source ON source.id = cost_basis.transfer_id
     JOIN accounts ON accounts.id = source.account_id
@@ -1552,7 +1552,7 @@ const listCryptoTransferCostBases = async (c: Context<HonoEnv>) => {
     ORDER BY source.executed_at, source.id
     LIMIT 501
   `)
-  const result = await (accountId ? statement.bind(accountId) : statement).all<{ account_id: string; amount: number; asset: string; executed_at: number; total_cost_thb: number; transfer_id: string; updated_at: number }>()
+  const result = await (accountId ? statement.bind(accountId) : statement).all<{ account_id: string; account_label: string; amount: number; asset: string; executed_at: number; total_cost_thb: number; transfer_id: string; updated_at: number }>()
   return c.json({ overrides: result.results.slice(0, 500), truncated: result.results.length > 500 })
 }
 
@@ -1756,14 +1756,13 @@ const api = factory
   .get('/history/price/:asset', async (c) => {
     const asset = normalizeAsset(c.req.param('asset'))
     if (!asset) return c.json({ error: 'Invalid asset' }, 400)
-    if (!parseCostMethod(c.req.query('costMethod'))) return c.json({ error: 'Invalid cost method' }, 400)
+    const costMethod = parseCostMethod(c.req.query('costMethod'))
+    if (!costMethod) return c.json({ error: 'Invalid cost method' }, 400)
     const { from, to } = historyBounds(c.req.query('from'), c.req.query('to'), c.req.query('days'))
     const histories = await getCachedPriceHistories(c.env, [asset], from, to)
     const points = histories[asset] ?? []
     if (c.req.query('averageCost') !== '1') return c.json({ asset, points })
     const accountId = c.req.query('account')
-    const costMethod = parseCostMethod(c.req.query('costMethod'))
-    if (!costMethod) return c.json({ error: 'Invalid cost method' }, 400)
     const holdings = await getHoldings(c.env.DB, accountId)
     const { pnl } = await getCachedBitkubPnl(c.env, holdings, costMethod, accountId)
     const averageCostAvailable = pnl.historyComplete && pnl.assets.some((candidate) => candidate.asset === asset && candidate.status === 'ready')

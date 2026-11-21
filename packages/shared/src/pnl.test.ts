@@ -543,3 +543,14 @@ describe('recent-lots cost method', () => {
     expect(asset(calculateAverageCostPnl(input)).costBasis).toBeLessThan(500)
   })
 })
+
+describe('recent-lots cost method with empty quantities', () => {
+  it('ignores a zero-amount deposit instead of keeping an empty lot', () => {
+    const at = (day: number) => Date.UTC(2026, 0, day, 3)
+    const base = { costMethod: 'lots' as const, holdings: [{ amount: 10, asset: 'XAAA', price: 1 }], overrides: [{ totalCostThb: 0, transferId: 'zero' }], trades: [{ amount: 10, baseAsset: 'XAAA', executedAt: at(1), fee: 0, feeAsset: 'THB', id: 'b', price: 1, quoteAmount: 10, quoteAsset: 'THB', side: 'buy' as const }] }
+    const withZero = calculateAverageCostPnl({ ...base, cryptoTransfers: [{ amount: 0, asset: 'XAAA', direction: 'deposit', executedAt: at(2), fee: 0, id: 'zero' }, { amount: 4, asset: 'XAAA', direction: 'withdraw', executedAt: at(3), fee: 0, id: 'out' }], holdings: [{ amount: 6, asset: 'XAAA', price: 1 }] })
+    const without = calculateAverageCostPnl({ ...base, cryptoTransfers: [{ amount: 4, asset: 'XAAA', direction: 'withdraw', executedAt: at(3), fee: 0, id: 'out' }], holdings: [{ amount: 6, asset: 'XAAA', price: 1 }], overrides: [] })
+
+    expect(withZero.assets).toEqual(without.assets)
+  })
+})

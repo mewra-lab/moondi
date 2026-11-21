@@ -982,6 +982,10 @@ input[type='number']::-webkit-outer-spin-button {
   margin-bottom: 20px;
 }
 
+.pnl-panel .section-heading {
+  flex-wrap: wrap;
+}
+
 .section-heading h2,
 .empty-state h2,
 .error-state h1,

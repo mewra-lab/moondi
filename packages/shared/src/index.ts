@@ -292,7 +292,7 @@ const applyCostBasisEvent = (positions: Map<string, PnlPosition>, event: PnlEven
       } else {
         position.cost += override
       }
-      if (method === 'lots') position.lots.push({ cost: override ?? 0, day: pnlLotDay(transfer.executedAt), quantity: transfer.amount })
+      if (method === 'lots' && transfer.amount > 0) position.lots.push({ cost: override ?? 0, day: pnlLotDay(transfer.executedAt), quantity: transfer.amount })
       return
     }
     closePosition(position, transfer.amount + transfer.fee, method === 'lots' ? { withdrawalDay: pnlLotDay(transfer.executedAt) } : undefined)
@@ -318,7 +318,7 @@ const applyCostBasisEvent = (positions: Map<string, PnlPosition>, event: PnlEven
     position.quantity += trade.amount
     if (trade.price > 0 && Number.isFinite(trade.price)) position.quantityUncertainty += pnlBuyRoundingThb / trade.price
     position.cost += quoteAmount + trade.fee
-    if (method === 'lots') position.lots.push({ cost: quoteAmount + trade.fee, day: pnlLotDay(trade.executedAt), quantity: trade.amount })
+    if (method === 'lots' && trade.amount > 0) position.lots.push({ cost: quoteAmount + trade.fee, day: pnlLotDay(trade.executedAt), quantity: trade.amount })
     return
   }
   const soldCost = closePosition(position, trade.amount, method === 'lots' ? {} : undefined)
