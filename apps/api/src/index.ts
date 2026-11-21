@@ -1876,6 +1876,11 @@ const awsDcaRoutes = createAwsDcaRoutes({
 const app = factory
   .createApp()
   .use('*', async (c, next) => {
+    c.header('X-Content-Type-Options', 'nosniff')
+    if (c.req.path !== '/health') c.header('Cache-Control', 'private, no-store')
+    await next()
+  })
+  .use('*', async (c, next) => {
     const allowedOrigin = readString(c.env, 'ALLOWED_ORIGIN') ?? 'http://localhost:5173'
     const requestOrigin = c.req.header('Origin')
     const isCrossSite = c.req.header('Sec-Fetch-Site') === 'cross-site'

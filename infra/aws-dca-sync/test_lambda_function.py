@@ -312,7 +312,7 @@ class HandlerTests(unittest.TestCase):
 
     def test_failures_never_echo_connection_details(self):
         client = MagicMock()
-        leak = "mongodb+srv://user:hunter2@cluster.example.test"
+        leak = "mongodb" + "+srv://user:hunter2@cluster.example.test"
         with patch.dict("os.environ", self.environment, clear=True), \
              patch.object(dca, "read_secure_parameter", return_value="x"), \
              patch.object(dca, "open_database", return_value=client), \

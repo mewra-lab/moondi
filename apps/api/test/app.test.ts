@@ -33,6 +33,20 @@ describe('API worker', () => {
     await expect(response.json()).resolves.toEqual({ status: 'ok' })
   })
 
+  it('marks every response as non-sniffable and keeps private data out of shared caches', async () => {
+    const health = await app.request('/health')
+    expect(health.headers.get('x-content-type-options')).toBe('nosniff')
+
+    for (const response of [
+      await app.request('/internal/aws-sync/bitkub/state', { method: 'POST' }),
+      await app.request('/nowhere'),
+      await app.request('/api/watchlist', { body: 'x', headers: { Origin: 'https://attacker.example' }, method: 'POST' }, { ALLOWED_ORIGIN: 'https://portfolio.example' }),
+    ]) {
+      expect(response.headers.get('x-content-type-options')).toBe('nosniff')
+      expect(response.headers.get('cache-control')).toBe('private, no-store')
+    }
+  })
+
   it('allows credentialed local development requests', async () => {
     const response = await app.request('/health', { headers: { Origin: 'http://localhost:5173' } })
     expect(response.headers.get('access-control-allow-credentials')).toBe('true')

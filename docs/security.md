@@ -16,6 +16,10 @@ and authenticated access to the dashboard.
 - When AWS is the approved Bitkub egress executor, store that Lambda's
   read-only key in AWS Systems Manager Parameter Store `SecureString`, scoped
   to its execution role. Do not copy the Bitkub credential into an API Worker.
+- The optional DCA bot feed follows the same rule: its MongoDB connection
+  string belongs in an SSM `SecureString`, never in a Lambda environment variable,
+  and the MongoDB user must be read-only. Never give that Lambda a public
+  Function URL; it is invoked only by its schedule.
 - Store local values only in ignored `.dev.vars` files.
 - Revoke and recreate a key if it was pasted into an issue, terminal transcript,
   commit, screenshot, or third-party service.
@@ -61,6 +65,13 @@ and authenticated access to the dashboard.
 
 - Use HTTPS only.
 - Keep `ALLOWED_ORIGIN` to the exact deployed web origin.
+- The web build emits a Cloudflare Pages `_headers` file with a strict
+  Content-Security-Policy (scripts from the app's own origin only, no inline or
+  `eval` scripts, network access limited to the app, the API origin taken from
+  `VITE_API_BASE_URL`, and Cloudflare Access), `frame-ancestors 'none'`,
+  `nosniff`, and `no-referrer`. If you add a third-party script, font, image
+  host, or API origin, extend `apps/web/security-headers.ts` deliberately.
+- The API Worker marks every response `nosniff` and `private, no-store`.
 - Do not interpret CORS as authentication.
 - Browser value concealment is a privacy convenience, not protection against a
   person with access to the logged-in browser or API response.
