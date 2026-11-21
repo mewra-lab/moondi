@@ -251,8 +251,8 @@ export type SavedCostBasis = {
   updated_at: number
 }
 
-export const loadSavedCostBases = async (): Promise<SavedCostBasis[]> => (
-  (await request<{ overrides: SavedCostBasis[] }>('/api/cost-basis-overrides')).overrides
+export const loadSavedCostBases = async (accountId?: string): Promise<{ overrides: SavedCostBasis[]; truncated: boolean }> => (
+  await request<{ overrides: SavedCostBasis[]; truncated: boolean }>(`/api/cost-basis-overrides${accountId ? `?account=${encodeURIComponent(accountId)}` : ''}`)
 )
 
 export const removeCryptoTransferCostBasis = async (transferId: string): Promise<void> => {

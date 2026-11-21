@@ -421,7 +421,8 @@ const PnlAssetDetails = ({ assets, language, valuesVisible }: { assets: PnlAsset
   )
 }
 
-const PnlPanel = ({ costMethod, ignoredAssets, language, onCostMethodChange, onRemoveCostBasis, onSaveCostBasis, pnl, valuesVisible }: {
+const PnlPanel = ({ accountId, costMethod, ignoredAssets, language, onCostMethodChange, onRemoveCostBasis, onSaveCostBasis, pnl, valuesVisible }: {
+  accountId?: string | undefined
   costMethod: CostMethod
   ignoredAssets: readonly string[]
   language: Language
@@ -579,23 +580,26 @@ const PnlPanel = ({ costMethod, ignoredAssets, language, onCostMethodChange, onR
         <button aria-controls="pnl-assets" aria-expanded={detailsOpen} className="pnl-details-toggle" onClick={() => setDetailsOpen((open) => !open)} type="button">{detailsOpen ? (language === 'th' ? 'ซ่อนรายละเอียดรายเหรียญ' : 'Hide asset details') : (language === 'th' ? `แสดงรายละเอียดรายเหรียญ (${visibleAssets.length})` : `Show asset details (${visibleAssets.length})`)}</button>
         {detailsOpen ? <PnlAssetDetails assets={visibleAssets} language={language} valuesVisible={valuesVisible} /> : null}
       </> : <p className="pnl-note">{language === 'th' ? 'ไม่มีเหรียญในมุมมองนี้' : 'No assets in this view.'}</p>}
-      <SavedCostBasisPanel language={language} onRemove={onRemoveCostBasis} onSave={onSaveCostBasis} refreshKey={pnl} valuesVisible={valuesVisible} />
+      <SavedCostBasisPanel accountId={accountId} language={language} onRemove={onRemoveCostBasis} onSave={onSaveCostBasis} valuesVisible={valuesVisible} />
       {message ? <p className="inline-status">{message}</p> : null}
     </section>
   )
 }
 
-const SavedCostBasisPanel = ({ language, onRemove, onSave, refreshKey, valuesVisible }: {
+const SavedCostBasisPanel = ({ accountId, language, onRemove, onSave, valuesVisible }: {
+  accountId?: string | undefined
   language: Language
   onRemove: (transferId: string) => Promise<void>
   onSave: (transferId: string, totalCostThb: number) => Promise<void>
-  refreshKey: unknown
   valuesVisible: boolean
 }) => {
   const [open, setOpen] = useState(false)
-  const [saved, setSaved] = useState<SavedCostBasis[] | null>(null)
+  const [saved, setSaved] = useState<{ overrides: SavedCostBasis[]; truncated: boolean } | null>(null)
+  const [loadFailed, setLoadFailed] = useState(false)
+  const [version, setVersion] = useState(0)
   const [drafts, setDrafts] = useState<Record<string, string>>({})
   const [confirmingId, setConfirmingId] = useState<string | null>(null)
+  const [focusRequest, setFocusRequest] = useState<{ action: 'confirm' | 'remove' | 'toggle'; id: string } | null>(null)
   const [workingId, setWorkingId] = useState<string | null>(null)
   const [message, setMessage] = useState<string | null>(null)
   const money = currency(language)
@@ -604,17 +608,32 @@ const SavedCostBasisPanel = ({ language, onRemove, onSave, refreshKey, valuesVis
   useEffect(() => {
     if (!open) return
     let active = true
-    void loadSavedCostBases()
-      .then((rows) => {
-        if (active) setSaved(rows)
+    void loadSavedCostBases(accountId)
+      .then((result) => {
+        if (!active) return
+        setSaved(result)
+        setLoadFailed(false)
       })
       .catch(() => {
-        if (active) setMessage(language === 'th' ? 'โหลดต้นทุนที่บันทึกไว้ไม่สำเร็จ' : 'Unable to load the saved cost bases.')
+        if (active) setLoadFailed(true)
       })
     return () => { active = false }
-  }, [language, open, refreshKey])
+  }, [accountId, open, version])
 
-  const run = async (transferId: string, action: () => Promise<void>, failure: string) => {
+  useEffect(() => {
+    setSaved(null)
+    setConfirmingId(null)
+    setDrafts({})
+  }, [accountId])
+
+  useEffect(() => {
+    if (!focusRequest) return
+    const selector = focusRequest.action === 'toggle' ? '#pnl-saved-toggle' : `[data-saved-id="${CSS.escape(focusRequest.id)}"][data-saved-action="${focusRequest.action}"]`
+    document.querySelector<HTMLElement>(selector)?.focus()
+    setFocusRequest(null)
+  }, [focusRequest, saved, confirmingId])
+
+  const run = async (transferId: string, action: () => Promise<void>, failure: string, removed: boolean) => {
     setWorkingId(transferId)
     setMessage(null)
     try {
@@ -625,10 +644,12 @@ const SavedCostBasisPanel = ({ language, onRemove, onSave, refreshKey, valuesVis
         delete next[transferId]
         return next
       })
+      if (removed) setFocusRequest({ action: 'toggle', id: transferId })
     } catch (error) {
       setMessage(mutationErrorMessage(error, language, failure))
     } finally {
       setWorkingId(null)
+      setVersion((current) => current + 1)
     }
   }
 
@@ -638,19 +659,22 @@ const SavedCostBasisPanel = ({ language, onRemove, onSave, refreshKey, valuesVis
       setMessage(language === 'th' ? 'กรอกต้นทุนรวมเป็นเงินบาทตั้งแต่ 0 ขึ้นไป' : 'Enter a total THB cost basis of zero or more.')
       return
     }
-    await run(row.transfer_id, () => onSave(row.transfer_id, value), language === 'th' ? 'บันทึกต้นทุนไม่สำเร็จ' : 'Unable to save the cost basis.')
+    await run(row.transfer_id, () => onSave(row.transfer_id, value), language === 'th' ? 'บันทึกต้นทุนไม่สำเร็จ' : 'Unable to save the cost basis.', false)
   }
+
+  const status = message ?? (loadFailed ? (language === 'th' ? 'โหลดต้นทุนที่บันทึกไว้ไม่สำเร็จ' : 'Unable to load the saved cost bases.') : null)
 
   return (
     <div className="pnl-cost-basis-list pnl-saved-cost-basis">
-      <button aria-controls="pnl-saved-cost-basis" aria-expanded={open} className="pnl-review-toggle" onClick={() => setOpen((current) => !current)} type="button">
+      <button aria-controls="pnl-saved-cost-basis" aria-expanded={open} className="pnl-review-toggle" id="pnl-saved-toggle" onClick={() => setOpen((current) => !current)} type="button">
         {open ? (language === 'th' ? 'ซ่อนต้นทุนที่บันทึกไว้' : 'Hide saved cost bases') : (language === 'th' ? 'ต้นทุนที่บันทึกไว้ — แก้ไขหรือลบ' : 'Saved cost bases — edit or remove')}
       </button>
       {open ? <div id="pnl-saved-cost-basis">
-        {saved === null && !message ? <p className="pnl-note">{language === 'th' ? 'กำลังโหลด…' : 'Loading…'}</p> : null}
-        {saved?.length === 0 ? <p className="pnl-note">{language === 'th' ? 'ยังไม่มีต้นทุนที่บันทึกไว้' : 'No cost bases are saved yet.'}</p> : null}
-        {saved && saved.length > 0 ? <p className="pnl-note">{language === 'th' ? 'หลังลบ รายการจะกลับไปอยู่ในรายการต้นทุนที่ต้องระบุ และ P&L ของเหรียญนั้นจะถูกระงับจนกว่าจะระบุใหม่' : 'After removing one, the deposit returns to the cost bases you still need to enter, and that asset’s P&L is withheld until you enter it again.'}</p> : null}
-        {(saved ?? []).map((row) => {
+        {saved === null && !loadFailed ? <p className="pnl-note">{language === 'th' ? 'กำลังโหลด…' : 'Loading…'}</p> : null}
+        {saved?.overrides.length === 0 ? <p className="pnl-note">{language === 'th' ? 'ยังไม่มีต้นทุนที่บันทึกไว้' : 'No cost bases are saved yet.'}</p> : null}
+        {saved && saved.overrides.length > 0 ? <p className="pnl-note">{language === 'th' ? 'หลังลบ รายการจะกลับไปอยู่ในรายการต้นทุนที่ต้องระบุ และ P&L ของเหรียญนั้นจะถูกระงับจนกว่าจะระบุใหม่' : 'After removing one, the deposit returns to the cost bases you still need to enter, and that asset’s P&L is withheld until you enter it again.'}</p> : null}
+        {saved?.truncated ? <p className="pnl-note">{language === 'th' ? 'แสดงเฉพาะ 500 รายการแรก' : 'Showing only the first 500 entries.'}</p> : null}
+        {(saved?.overrides ?? []).map((row) => {
           const draft = drafts[row.transfer_id]
           const changed = draft !== undefined && draft.trim() !== '' && parseDecimal(draft) !== row.total_cost_thb
           const working = workingId === row.transfer_id
@@ -660,14 +684,14 @@ const SavedCostBasisPanel = ({ language, onRemove, onSave, refreshKey, valuesVis
               <label><span className="sr-only">{language === 'th' ? 'ต้นทุนรวม THB' : 'Total THB cost basis'}</span><Input inputMode="decimal" min="0" onChange={(event) => setDrafts((current) => ({ ...current, [row.transfer_id]: event.target.value }))} placeholder={language === 'th' ? 'ต้นทุนใหม่ (THB)' : 'New total THB cost'} step="any" type="number" value={draft ?? ''} /></label>
               <button className="export-button" disabled={working || !changed} type="submit">{working ? (language === 'th' ? 'กำลังบันทึก…' : 'Saving…') : (language === 'th' ? 'บันทึก' : 'Save')}</button>
               {confirmingId === row.transfer_id ? <span className="pnl-saved-confirm">
-                <button className="export-button" disabled={working} onClick={() => void run(row.transfer_id, () => onRemove(row.transfer_id), language === 'th' ? 'ลบต้นทุนไม่สำเร็จ' : 'Unable to remove the cost basis.')} type="button">{language === 'th' ? 'ยืนยันลบ' : 'Confirm remove'}</button>
-                <button className="export-button" disabled={working} onClick={() => setConfirmingId(null)} type="button">{language === 'th' ? 'ยกเลิก' : 'Cancel'}</button>
-              </span> : <button className="export-button" disabled={working} onClick={() => setConfirmingId(row.transfer_id)} type="button">{language === 'th' ? 'ลบ' : 'Remove'}</button>}
+                <button className="export-button" data-saved-action="confirm" data-saved-id={row.transfer_id} disabled={working} onClick={() => void run(row.transfer_id, () => onRemove(row.transfer_id), language === 'th' ? 'ลบต้นทุนไม่สำเร็จ' : 'Unable to remove the cost basis.', true)} type="button">{language === 'th' ? 'ยืนยันลบ' : 'Confirm remove'}</button>
+                <button className="export-button" disabled={working} onClick={() => { setConfirmingId(null); setFocusRequest({ action: 'remove', id: row.transfer_id }) }} type="button">{language === 'th' ? 'ยกเลิก' : 'Cancel'}</button>
+              </span> : <button className="export-button" data-saved-action="remove" data-saved-id={row.transfer_id} disabled={working} onClick={() => { setConfirmingId(row.transfer_id); setFocusRequest({ action: 'confirm', id: row.transfer_id }) }} type="button">{language === 'th' ? 'ลบ' : 'Remove'}</button>}
             </form>
           )
         })}
-        {message ? <p className="inline-status" role="status">{message}</p> : null}
       </div> : null}
+      <p aria-live="polite" className={status ? 'inline-status' : 'sr-only'} role="status">{status}</p>
     </div>
   )
 }
@@ -3479,7 +3503,7 @@ export const App = () => {
                   {hasAllocationCard ? <PortfolioAllocation language={language} slices={allocationSlices} valuesVisible={valuesVisible} /> : null}
                 </div>
 
-                {overviewSections.pnl && portfolio ? <PnlPanel costMethod={costMethod} ignoredAssets={ignoredPnlAssets} language={language} onCostMethodChange={setCostMethod} onRemoveCostBasis={async (transferId) => { await removeCryptoTransferCostBasis(transferId); await reloadDashboard() }} onSaveCostBasis={async (transferId, totalCostThb) => { await saveCryptoTransferCostBasis(transferId, totalCostThb); await reloadDashboard() }} pnl={portfolio.pnl} valuesVisible={valuesVisible} /> : null}
+                {overviewSections.pnl && portfolio ? <PnlPanel accountId={selectedAccountId} costMethod={costMethod} ignoredAssets={ignoredPnlAssets} language={language} onCostMethodChange={setCostMethod} onRemoveCostBasis={async (transferId) => { await removeCryptoTransferCostBasis(transferId); await reloadDashboard() }} onSaveCostBasis={async (transferId, totalCostThb) => { await saveCryptoTransferCostBasis(transferId, totalCostThb); await reloadDashboard() }} pnl={portfolio.pnl} valuesVisible={valuesVisible} /> : null}
                 {overviewSections.history ? <PortfolioHistory language={language} onOpenHistory={() => navigateTo('history')} points={history} valuesVisible={valuesVisible} /> : null}
                 {overviewSections.targets ? <AllocationTargets holdings={portfolio?.holdings ?? []} language={language} onRemove={async (asset) => { await removeAllocationTarget(asset); setAllocationTargets((current) => current.filter((target) => target.asset !== asset)) }} onSave={async (asset, targetPercent) => { const target = await saveAllocationTarget(asset, targetPercent); setAllocationTargets((current) => [...current.filter((item) => item.asset !== asset), target].toSorted((left, right) => left.asset.localeCompare(right.asset))) }} targets={allocationTargets} /> : null}
                 {overviewSections.rebalance ? <RebalanceAssistant holdings={portfolio?.holdings ?? []} language={language} targets={allocationTargets} valuesVisible={valuesVisible} /> : null}

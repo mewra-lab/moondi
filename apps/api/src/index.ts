@@ -1550,10 +1550,10 @@ const listCryptoTransferCostBases = async (c: Context<HonoEnv>) => {
     JOIN accounts ON accounts.id = source.account_id
     WHERE source.direction = 'deposit' AND accounts.exchange = 'bitkub' AND accounts.archived_at IS NULL ${accountId ? 'AND accounts.id = ?' : ''}
     ORDER BY source.executed_at, source.id
-    LIMIT 500
+    LIMIT 501
   `)
   const result = await (accountId ? statement.bind(accountId) : statement).all<{ account_id: string; amount: number; asset: string; executed_at: number; total_cost_thb: number; transfer_id: string; updated_at: number }>()
-  return c.json({ overrides: result.results })
+  return c.json({ overrides: result.results.slice(0, 500), truncated: result.results.length > 500 })
 }
 
 const pushTestCooldownSeconds = 60

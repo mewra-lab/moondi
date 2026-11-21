@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import app from '../src/index'
 import { createSqliteD1 } from './sqlite-d1.mjs'
 
-type SavedBody = { overrides: { account_id: string; amount: number; asset: string; executed_at: number; total_cost_thb: number; transfer_id: string; updated_at: number }[] }
+type SavedBody = { truncated: boolean; overrides: { account_id: string; amount: number; asset: string; executed_at: number; total_cost_thb: number; transfer_id: string; updated_at: number }[] }
 
 const setup = () => {
   const { d1, database } = createSqliteD1()
@@ -58,6 +58,21 @@ describe('saved cost bases', () => {
     const after = (await (await request('/api/cost-basis-overrides')).json()) as SavedBody
     expect(after.overrides.map((row) => row.transfer_id)).not.toContain('in-5')
     expect(after.overrides).toHaveLength(3)
+  })
+
+  it('says so when more than 500 cost bases are saved instead of silently cutting the list', async () => {
+    const { database, request } = setup()
+    const insertTransfer = database.prepare("INSERT INTO crypto_transfers (id, account_id, external_id, direction, asset, amount, fee, tx_hash, executed_at, raw_json) VALUES (?, 'main', ?, 'deposit', 'XAAA', 1, 0, NULL, ?, '{}')")
+    const insertCost = database.prepare('INSERT INTO crypto_transfer_cost_basis (transfer_id, total_cost_thb, updated_at) VALUES (?, 1, 1)')
+    for (let index = 0; index < 600; index += 1) {
+      insertTransfer.run(`bulk-${index}`, `bulk-${index}`, 1000 + index)
+      insertCost.run(`bulk-${index}`)
+    }
+    const body = (await (await request('/api/cost-basis-overrides')).json()) as SavedBody
+
+    expect(body.overrides).toHaveLength(500)
+    expect(body.truncated).toBe(true)
+    expect(((await (await request('/api/cost-basis-overrides?account=second')).json()) as SavedBody).truncated).toBe(false)
   })
 
   it('changes nothing else when one saved cost basis is removed', async () => {
