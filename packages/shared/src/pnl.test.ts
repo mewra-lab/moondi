@@ -358,7 +358,6 @@ describe('suggestCarriedCostBasis', () => {
 })
 
 describe('recent-lots cost method', () => {
-  // Thailand has no DST, so the lot day is the UTC+7 calendar day; hours below are UTC.
   const at = (day: number, hour = 3) => Date.UTC(2026, 0, day, hour)
   const buy = (id: string, executedAt: number, amount: number, costThb: number) => ({ amount, baseAsset: 'XAAA', executedAt, fee: 0, feeAsset: 'THB', id, price: costThb / amount, quoteAmount: costThb, quoteAsset: 'THB', side: 'buy' as const })
   const sell = (id: string, executedAt: number, amount: number, proceedsThb: number) => ({ amount, baseAsset: 'XAAA', executedAt, fee: 0, feeAsset: 'THB', id, price: proceedsThb / amount, quoteAmount: proceedsThb, quoteAsset: 'THB', side: 'sell' as const })
@@ -416,7 +415,6 @@ describe('recent-lots cost method', () => {
       trades: [buy('old', at(1), 100, 100), buy('morning', at(5, 1), 50, 10), buy('noon', at(5, 5), 50, 30)],
     })
 
-    // 50 from "noon" (30), 30 from "morning" (6): what stays is the old lot plus 20 of "morning".
     expect(asset(result).costBasis).toBeCloseTo(100 + 4, 9)
   })
 
@@ -430,8 +428,8 @@ describe('recent-lots cost method', () => {
       trades,
     })).costBasis
 
-    expect(run(Date.UTC(2026, 0, 5, 16, 59, 30))).toBe(100) // still 5 Jan in Thailand
-    expect(run(Date.UTC(2026, 0, 5, 17, 1))).toBe(10) // already 6 Jan in Thailand
+    expect(run(Date.UTC(2026, 0, 5, 16, 59, 30))).toBe(100)
+    expect(run(Date.UTC(2026, 0, 5, 17, 1))).toBe(10)
   })
 
   it('counts the withdrawal fee as coins that left the lots', () => {
@@ -516,7 +514,6 @@ describe('recent-lots cost method', () => {
       trades: [buy('old', at(1), 100, 1000), buy('new', at(5, 2), 50, 5)],
     })
 
-    // 50 coins at 5 THB from the newest withdrawal, then 70 coins at 10 THB from the older one.
     expect(suggestions.get('back')).toEqual({ costThb: 5 + 700, matchedQuantity: 120 })
   })
 

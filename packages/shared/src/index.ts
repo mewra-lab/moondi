@@ -108,14 +108,6 @@ export type CostBasisOverride = {
   totalCostThb: number
 }
 
-/**
- * How the cost of sold or withdrawn coins is chosen.
- * - `average`: one pooled average cost per position (the documented default).
- * - `lots`: every buy or deposit is its own lot. A sale takes the most recently acquired lots first.
- *   A withdrawal takes coins acquired on the same (Thailand) calendar day first, newest first,
- *   then the oldest remaining lots. This approximates "the coins I just bought are the ones I sent
- *   to my wallet" and keeps the cost of older coins that never moved.
- */
 export type PnlCostMethod = 'average' | 'lots'
 
 export type PnlAssetStatus =
@@ -347,7 +339,6 @@ export const suggestCarriedCostBasis = ({
     .map((override) => [override.transferId, override.totalCostThb]))
   const positions = new Map<string, PnlPosition>()
   const pools = new Map<string, TransitPool>()
-  // Lots method: each withdrawal stays a separate segment at its own real cost; the newest comes back first.
   const transit = new Map<string, TransitPool[]>()
   const suggestions = new Map<string, CarriedCostSuggestion>()
 
