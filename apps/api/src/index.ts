@@ -310,13 +310,13 @@ const getHoldings = async (db: D1Database, accountId?: string): Promise<HoldingR
 }
 
 const parseCostMethod = (value: string | undefined): PnlCostMethod | undefined => (
-  value === undefined || value === 'average' ? 'average' : value === 'lots' ? 'lots' : undefined
+  value === undefined || value === '' || value === 'average' ? 'average' : value === 'lots' ? 'lots' : undefined
 )
 
 const missingArchivePnl = (accountIds: string[], costMethod: PnlCostMethod): PnlResult => ({
   assets: [],
   complete: false,
-  costMethod,
+  ...(costMethod === 'lots' ? { costMethod } : {}),
   historyComplete: false,
   investedAmount: null,
   missingCostBasis: [],
@@ -661,7 +661,7 @@ const getCachedBitkubPnl = async (env: Env, holdings: HoldingRow[], costMethod: 
     .reduce((latest, holding) => Math.max(latest, holding.updated_at ?? 0), 0)
   const fingerprint = await sha256Hex(JSON.stringify({
     accountId: accountId ?? 'all',
-    costMethod,
+    ...(costMethod === 'lots' ? { costMethod } : {}),
     archiveScope: archiveScope.map((account) => [
       account.account_id,
       account.archive_before,
@@ -673,10 +673,10 @@ const getCachedBitkubPnl = async (env: Env, holdings: HoldingRow[], costMethod: 
     latestHoldingUpdate,
     revisions,
   }))
-  const key = `bitkub-pnl:v6:${fingerprint}`
+  const key = `bitkub-pnl:v5:${fingerprint}`
   if (typeof env.CACHE.get === 'function') {
     const cached = await env.CACHE.get<PnlResult>(key, 'json')
-    if (cached && typeof cached === 'object' && Array.isArray(cached.assets) && typeof cached.complete === 'boolean' && cached.costMethod === costMethod) {
+    if (cached && typeof cached === 'object' && Array.isArray(cached.assets) && typeof cached.complete === 'boolean' && (cached.costMethod ?? 'average') === costMethod) {
       return { pnl: cached, revision: fingerprint }
     }
   }
@@ -1740,6 +1740,7 @@ const api = factory
   .get('/history/price/:asset', async (c) => {
     const asset = normalizeAsset(c.req.param('asset'))
     if (!asset) return c.json({ error: 'Invalid asset' }, 400)
+    if (!parseCostMethod(c.req.query('costMethod'))) return c.json({ error: 'Invalid cost method' }, 400)
     const { from, to } = historyBounds(c.req.query('from'), c.req.query('to'), c.req.query('days'))
     const histories = await getCachedPriceHistories(c.env, [asset], from, to)
     const points = histories[asset] ?? []

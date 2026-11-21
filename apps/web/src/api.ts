@@ -53,7 +53,7 @@ export type CostMethod = 'average' | 'lots'
 export type PnlSummary = {
   assets: PnlAsset[]
   complete: boolean
-  costMethod: CostMethod
+  costMethod?: CostMethod
   historyComplete: boolean
   investedAmount: number | null
   missingCostBasis: MissingCostBasis[]

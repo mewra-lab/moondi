@@ -559,7 +559,7 @@ const PnlPanel = ({ costMethod, ignoredAssets, language, onCostMethodChange, onS
               <span>{transfer.asset} · <span className={valuesVisible ? undefined : 'value-concealed'}>{quantity.format(transfer.amount)}</span> · {dateTime(language).format(transfer.executedAt)}</span>
               <label><span className="sr-only">{language === 'th' ? 'ต้นทุนรวม THB' : 'Total THB cost basis'}</span><Input inputMode="decimal" min="0" onChange={(event) => setDrafts((current) => ({ ...current, [transfer.transferId]: event.target.value }))} placeholder={language === 'th' ? 'ต้นทุนรวม THB' : 'Total THB cost'} type="number" value={drafts[transfer.transferId] ?? ''} /></label>
               <button className="export-button" disabled={workingTransferId === transfer.transferId} type="submit">{workingTransferId === transfer.transferId ? (language === 'th' ? 'กำลังบันทึก…' : 'Saving…') : (language === 'th' ? 'บันทึก' : 'Save')}</button>
-              {transfer.suggestedCostThb !== undefined && transfer.suggestedMatchedQuantity !== undefined ? <CarriedCostSuggestion costMethod={pnl.costMethod}
+              {transfer.suggestedCostThb !== undefined && transfer.suggestedMatchedQuantity !== undefined ? <CarriedCostSuggestion costMethod={pnl.costMethod ?? 'average'}
                 amount={transfer.amount}
                 asset={transfer.asset}
                 costThb={transfer.suggestedCostThb}
@@ -1141,7 +1141,7 @@ const PortfolioCardDialog = ({ holdings, ignoredPnlAssets, language, onClose, op
   const cardPnlAsset = pnlScope === 'selection' ? selectedPnlGroup : selectedPnlAsset
   const cardPnlLabel = pnlScope === 'selection' ? (language === 'th' ? `P&L ที่เลือก (${includedPnlAssets.length})` : `Selected P&L (${includedPnlAssets.length})`) : undefined
   const imageOptions = {
-    costMethod: pnl.costMethod,
+    costMethod: pnl.costMethod ?? 'average',
     holdings,
     language,
     pnlAsset: preset === 'pnl' ? cardPnlAsset : undefined,

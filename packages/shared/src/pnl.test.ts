@@ -368,14 +368,17 @@ describe('recent-lots cost method', () => {
   it('uses the average-cost method unless the lots method is requested', () => {
     const result = calculateAverageCostPnl({ cryptoTransfers: [], holdings: [{ amount: 100, asset: 'XAAA', price: 1 }], overrides: [], trades: [buy('b', at(1), 100, 100)] })
 
-    expect(result.costMethod).toBe('average')
+    expect(result.costMethod).toBeUndefined()
     expect(calculateAverageCostPnl({ costMethod: 'lots', cryptoTransfers: [], holdings: [{ amount: 100, asset: 'XAAA', price: 1 }], overrides: [], trades: [buy('b', at(1), 100, 100)] }).costMethod).toBe('lots')
   })
 
   it('gives the same result as average cost when nothing is ever sold or withdrawn', () => {
     const input = { cryptoTransfers: [], holdings: [{ amount: 300, asset: 'XAAA', price: 2 }], overrides: [], trades: [buy('a', at(1), 100, 100), buy('b', at(2), 100, 10), buy('c', at(3), 100, 50)] }
 
-    expect({ ...calculateAverageCostPnl({ ...input, costMethod: 'lots' }), costMethod: 'average' }).toEqual(calculateAverageCostPnl(input))
+    const { costMethod, ...lots } = calculateAverageCostPnl({ ...input, costMethod: 'lots' })
+
+    expect(costMethod).toBe('lots')
+    expect(lots).toEqual(calculateAverageCostPnl(input))
   })
 
   it('sells the most recently bought lot first and keeps the older cost', () => {

@@ -149,7 +149,7 @@ export type MissingCostBasis = {
 export type PnlResult = {
   assets: PnlAsset[]
   complete: boolean
-  costMethod: PnlCostMethod
+  costMethod?: PnlCostMethod
   historyComplete: boolean
   investedAmount: number | null
   missingHistoryAccounts: string[]
@@ -213,27 +213,34 @@ const pnlLotDay = (executedAt: number): number => Math.floor((executedAt + thail
 
 const consumeLots = (position: PnlPosition, amount: number, withdrawalDay: number | undefined): number => {
   const lots = position.lots
-  const order = withdrawalDay === undefined
-    ? [...lots].reverse()
-    : [...lots.filter((lot) => lot.day === withdrawalDay).reverse(), ...lots.filter((lot) => lot.day !== withdrawalDay)]
   let remaining = amount
   let cost = 0
-  for (const lot of order) {
-    if (remaining <= 0) break
+  let emptied = false
+  const take = (lot: PnlLot): void => {
+    if (remaining <= 0 || lot.quantity <= 0) return
     if (lot.quantity <= remaining) {
       remaining -= lot.quantity
       cost += lot.cost
       lot.quantity = 0
       lot.cost = 0
-    } else {
-      const taken = lot.cost * remaining / lot.quantity
-      lot.quantity -= remaining
-      lot.cost -= taken
-      cost += taken
-      remaining = 0
+      emptied = true
+      return
     }
+    const taken = lot.cost * remaining / lot.quantity
+    lot.quantity -= remaining
+    lot.cost -= taken
+    cost += taken
+    remaining = 0
   }
-  position.lots = lots.filter((lot) => lot.quantity > 1e-12)
+  if (withdrawalDay === undefined) {
+    for (let index = lots.length - 1; index >= 0 && remaining > 0; index -= 1) take(lots[index]!)
+  } else {
+    for (let index = lots.length - 1; index >= 0 && remaining > 0; index -= 1) {
+      if (lots[index]!.day === withdrawalDay) take(lots[index]!)
+    }
+    for (let index = 0; index < lots.length && remaining > 0; index += 1) take(lots[index]!)
+  }
+  if (emptied) position.lots = lots.filter((lot) => lot.quantity > 1e-12)
   return cost
 }
 
@@ -592,7 +599,7 @@ export const calculateAverageCostPnl = ({
   return {
     assets,
     complete,
-    costMethod,
+    ...(costMethod === 'lots' ? { costMethod } : {}),
     historyComplete: true,
     investedAmount,
     missingHistoryAccounts: [],

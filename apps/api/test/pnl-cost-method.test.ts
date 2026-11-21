@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import app from '../src/index'
 import { createSqliteD1 } from './sqlite-d1.mjs'
 
-type PnlBody = { pnl: { assets: { asset: string; costBasis: number | null; status: string }[]; costMethod: string } }
+type PnlBody = { pnl: { assets: { asset: string; costBasis: number | null; status: string }[]; costMethod?: string } }
 
 const at = (day: number, hour = 3) => Date.UTC(2026, 0, day, hour)
 
@@ -46,7 +46,7 @@ describe('P&L cost method', () => {
     const { get } = setup()
     const body = (await (await get('/api/portfolio')).json()) as PnlBody
 
-    expect(body.pnl.costMethod).toBe('average')
+    expect(Object.keys(body.pnl)).not.toContain('costMethod')
     expect(xaaa(body)).toMatchObject({ costBasis: 55, status: 'ready' })
   })
 
@@ -62,7 +62,7 @@ describe('P&L cost method', () => {
 
   it('never serves a cached result computed with the other method', async () => {
     const { get } = setup()
-    for (const [query, expected] of [['', 55], ['?costMethod=lots', 100], ['', 55], ['?costMethod=lots', 100]] as const) {
+    for (const [query, expected] of [['', 55], ['?costMethod=lots', 100], ['', 55], ['?costMethod=average', 55], ['?costMethod=lots', 100]] as const) {
       const body = (await (await get(`/api/portfolio${query}`)).json()) as PnlBody
       expect(xaaa(body)?.costBasis).toBe(expected)
     }
@@ -70,7 +70,7 @@ describe('P&L cost method', () => {
 
   it('rejects an unknown cost method instead of silently using the default', async () => {
     const { get } = setup()
-    for (const path of ['/api/portfolio?costMethod=fifo', '/api/portfolio/main?costMethod=x', '/api/history/value?assets=XAAA&costMethod=x', '/api/history/price/XAAA?averageCost=1&costMethod=x']) {
+    for (const path of ['/api/portfolio?costMethod=fifo', '/api/portfolio/main?costMethod=x', '/api/history/value?assets=XAAA&costMethod=x', '/api/history/price/XAAA?averageCost=1&costMethod=x', '/api/history/price/XAAA?costMethod=x']) {
       const response = await get(path)
       expect(response.status, path).toBe(400)
       expect(await response.json()).toEqual({ error: 'Invalid cost method' })
