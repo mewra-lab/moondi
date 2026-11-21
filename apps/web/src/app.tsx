@@ -557,7 +557,7 @@ const PnlPanel = ({ costMethod, ignoredAssets, language, onCostMethodChange, onS
             {missingCostBasis.map((transfer) => (
             <form key={transfer.transferId} onSubmit={(event) => { event.preventDefault(); void save(transfer.transferId) }}>
               <span>{transfer.asset} · <span className={valuesVisible ? undefined : 'value-concealed'}>{quantity.format(transfer.amount)}</span> · {dateTime(language).format(transfer.executedAt)}</span>
-              <label><span className="sr-only">{language === 'th' ? 'ต้นทุนรวม THB' : 'Total THB cost basis'}</span><Input inputMode="decimal" min="0" onChange={(event) => setDrafts((current) => ({ ...current, [transfer.transferId]: event.target.value }))} placeholder={language === 'th' ? 'ต้นทุนรวม THB' : 'Total THB cost'} type="number" value={drafts[transfer.transferId] ?? ''} /></label>
+              <label><span className="sr-only">{language === 'th' ? 'ต้นทุนรวม THB' : 'Total THB cost basis'}</span><Input inputMode="decimal" min="0" onChange={(event) => setDrafts((current) => ({ ...current, [transfer.transferId]: event.target.value }))} placeholder={language === 'th' ? 'ต้นทุนรวม THB' : 'Total THB cost'} step="any" type="number" value={drafts[transfer.transferId] ?? ''} /></label>
               <button className="export-button" disabled={workingTransferId === transfer.transferId} type="submit">{workingTransferId === transfer.transferId ? (language === 'th' ? 'กำลังบันทึก…' : 'Saving…') : (language === 'th' ? 'บันทึก' : 'Save')}</button>
               {transfer.suggestedCostThb !== undefined && transfer.suggestedMatchedQuantity !== undefined ? <CarriedCostSuggestion costMethod={pnl.costMethod ?? 'average'}
                 amount={transfer.amount}
