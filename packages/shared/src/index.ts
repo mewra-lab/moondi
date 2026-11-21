@@ -1,3 +1,5 @@
+export type { DcaActivity, DcaBuy } from './dca-activity'
+
 export type ExchangeId = 'bitkub' | 'binance'
 
 export type NormalizedBalance = {
@@ -164,9 +166,6 @@ type PnlEvent =
 
 const pnlQuantityTolerance = 2e-7
 
-// Bitkub reports a buy's THB amount and fee rounded to 0.01 and gives no credited crypto quantity,
-// so a buy's base quantity derived from them can be off by up to 0.01 THB / price (a partial fill
-// of an order is the visible case: the exchange credits the book's exact size, not THB / price).
 const pnlBuyRoundingThb = 0.01
 
 const finiteNonNegative = (value: number): boolean => Number.isFinite(value) && value >= 0
@@ -198,7 +197,6 @@ const closePosition = (position: PnlPosition, amount: number): number | undefine
     return undefined
   }
   if (position.quantity <= pnlQuantityTolerance) return 0
-  // A sale that leaves only rounding dust closes the whole position, so no phantom cost stays open.
   const closedAmount = position.quantity - amount <= slack ? position.quantity : amount
   const cost = position.cost * closedAmount / position.quantity
   position.quantity -= closedAmount

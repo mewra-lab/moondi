@@ -4,6 +4,8 @@
   "version": "0.1.0",
   "type": "module",
   "dependencies": {
+    "@base-ui/react": "1.9.0",
+    "@moondi/shared": "*",
     "@vitejs/plugin-react": "^5.1.1",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",

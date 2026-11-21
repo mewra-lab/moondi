@@ -42,5 +42,10 @@
     "@types/node": "^26.3.0",
     "typescript": "^5.9.3",
     "vitest": "^4.0.4"
+  },
+  "overrides": {
+    "workbox-build": {
+      "glob": "14.0.6"
+    }
   }
 }

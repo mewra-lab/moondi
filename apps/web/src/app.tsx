@@ -1,13 +1,23 @@
-import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, type TouchEvent } from 'react'
+import { lazy, Suspense, useCallback, useDeferredValue, useEffect, useId, useMemo, useRef, useState, type ComponentProps, type MouseEvent, type TouchEvent } from 'react'
 import { useRegisterSW } from 'virtual:pwa-register/react'
-import { addPriceAlert, addWatchlistAsset, apiAccessRequired, apiAccessUrl, archiveAccount, loadAccounts, loadArchivedAccounts, loadAssetPriceHistories, loadAssetPriceHistory, loadBackup, loadDashboard, loadPushPublicKey, loadSyncEvents, loadTransactions, loadValueHistory, removeAllocationTarget, removePriceAlert, removePushSubscription, removeWatchlistAsset, restoreAccount, saveAllocationTarget, saveCryptoTransferCostBasis, savePushSubscription, testPushDelivery } from './api'
+import { AlertDialog } from '@base-ui/react/alert-dialog'
+import { Button } from '@base-ui/react/button'
+import { Input } from '@base-ui/react/input'
+import { Switch } from '@base-ui/react/switch'
+import { AppSelect } from './app-select'
+import { AssetIcon } from './asset-icon'
+import { addPriceAlert, addWatchlistAsset, apiAccessRequired, apiAccessUrl, archiveAccount, loadAccounts, loadArchivedAccounts, loadAssetPriceHistories, loadAssetPriceHistory, loadBackup, loadDashboard, loadDcaActivity, loadPushPublicKey, loadSyncEvents, loadTransactions, loadValueHistory, removeAllocationTarget, removePriceAlert, removePushSubscription, removeWatchlistAsset, restoreAccount, saveAllocationTarget, saveCryptoTransferCostBasis, savePushSubscription, testPushDelivery } from './api'
 import type { Account, AllocationTarget, Dashboard, Holding, PnlAsset, PnlSummary as PnlSummaryData, Portfolio, PriceAlert, PriceHistoryPoint, PushNotificationPreferences, SyncEvent, SyncStatus, Transaction, ValueHistoryPoint, WatchlistAsset } from './api'
+import type { DcaActivity, DcaBuy } from '@moondi/shared'
+import { DcaActivityPanel } from './dca-activity'
+import { NotificationCenter, type NotificationItem } from './notification-center'
 import { getCurrentPushSubscription, isPushSupported, subscribeToPush, unsubscribeFromPush } from './push'
 import { formatTransactionMoney, transactionValue } from './transaction-display'
 import { filterPnlAssets, summarizePnlAssets, type PnlDisplayScope } from './pnl-display'
 import { fitCanvasText } from './portfolio-card-layout'
+import { ActivityIcon, ChevronRightIcon, CloseIcon, EyeIcon, EyeOffIcon, HistoryIcon, ImageCardIcon, MoonIcon, OverviewIcon, SettingsIcon, SignOutIcon, SunIcon, SyncIcon } from './icons'
+import { buildRouteUrl, parseRoute, type View } from './routes'
 
-type View = 'overview' | 'history' | 'sync' | 'transactions'
 type Theme = 'light' | 'dark'
 type Language = 'th' | 'en'
 type HoldingSort = 'asset' | 'quantity' | 'value'
@@ -246,41 +256,48 @@ const aggregatePortfolioAllocation = (holdings: Holding[]): AllocationSlice[] =>
   return visible.map(({ asset, value }) => ({ asset, share: (value / total) * 100, value }))
 }
 
-const PortfolioAllocation = ({ holdings, language, valuesVisible }: { holdings: Holding[]; language: Language; valuesVisible: boolean }) => {
-  const slices = aggregatePortfolioAllocation(holdings)
-  if (slices.length === 0) return null
-
-  let offset = 0
-  const label = language === 'th' ? 'สัดส่วนมูลค่าสินทรัพย์ปัจจุบันในพอร์ต' : 'Current portfolio value allocation'
+const PortfolioAllocation = ({ slices, language, valuesVisible }: { slices: AllocationSlice[]; language: Language; valuesVisible: boolean }) => {
+  const [selectedAsset, setSelectedAsset] = useState<string | null>(null)
+  const selected = slices.find((slice) => slice.asset === selectedAsset)
+  const th = language === 'th'
   const money = currency(language)
+  const label = th ? 'สัดส่วนมูลค่าสินทรัพย์ปัจจุบันในพอร์ต' : 'Current portfolio value allocation'
+  const assetLabel = (asset: string) => asset === 'Other' && th ? 'อื่น ๆ' : asset
+  const total = slices.reduce((sum, slice) => sum + slice.value, 0)
+  const compactTotal = new Intl.NumberFormat(th ? 'th-TH' : 'en-GB', {
+    notation: 'compact',
+    maximumFractionDigits: 1,
+  }).format(total)
+  let offset = 0
 
   return (
     <section aria-labelledby="allocation-title" className="portfolio-allocation">
       <div className="section-heading">
         <div>
-          <p className="eyebrow">Allocation</p>
-          <h2 id="allocation-title">{language === 'th' ? 'สัดส่วนสินทรัพย์' : 'Portfolio allocation'}</h2>
-          <p className="allocation-note">{language === 'th' ? 'แบ่งตามมูลค่าประเมินปัจจุบัน ไม่ใช่กำไรหรือเงินลงทุน' : 'Based on current estimated value, not profit or invested capital.'}</p>
+          <h2 id="allocation-title">{th ? 'สัดส่วนสินทรัพย์' : 'Portfolio allocation'}</h2>
+          <p className="allocation-note">{th ? 'ตามมูลค่าปัจจุบัน' : 'By current estimated value.'}</p>
         </div>
       </div>
       <div className="allocation-content">
         <div className="allocation-donut">
           <svg aria-label={label} role="img" viewBox="0 0 120 120">
-            <circle className="allocation-track" cx="60" cy="60" fill="none" pathLength="100" r="48" strokeWidth="14" />
+            <circle className="allocation-track" cx="60" cy="60" fill="none" pathLength="100" r="49" strokeWidth="15" />
             {slices.map((slice, index) => {
-              const dash = Math.max(slice.share - 1.2, 0)
+              const gap = slices.length > 1 ? Math.min(0.9, slice.share * 0.25) : 0
+              const dash = slice.share - gap
               const segment = (
                 <circle
                   className="allocation-segment"
                   cx="60"
                   cy="60"
+                  data-dimmed={selected && selected !== slice ? true : undefined}
                   fill="none"
                   key={slice.asset}
                   pathLength="100"
-                  r="48"
+                  r="49"
                   strokeDasharray={`${dash} ${100 - dash}`}
                   strokeDashoffset={-offset}
-                  strokeWidth="14"
+                  strokeWidth={selected === slice ? 18 : 15}
                   style={{ stroke: allocationColors[index % allocationColors.length] }}
                 />
               )
@@ -288,19 +305,114 @@ const PortfolioAllocation = ({ holdings, language, valuesVisible }: { holdings: 
               return segment
             })}
           </svg>
-          <span>{language === 'th' ? 'มูลค่าปัจจุบัน' : 'Current value'}</span>
+          <div className="allocation-center">
+            <strong title={valuesVisible && !selected ? money.format(total) : undefined}>{selected ? `${selected.share.toFixed(1)}%` : valuesVisible ? `฿${compactTotal}` : '—'}</strong>
+            <span>{selected ? assetLabel(selected.asset) : (th ? 'มูลค่าพอร์ต' : 'Portfolio value')}</span>
+          </div>
         </div>
-        <ul className="allocation-legend">
+        <ul className="allocation-legend" role="list">
           {slices.map((slice, index) => (
             <li key={slice.asset}>
-              <span aria-hidden="true" className="allocation-swatch" style={{ background: allocationColors[index % allocationColors.length] }} />
-              <span className="allocation-asset"><strong>{slice.asset === 'Other' ? (language === 'th' ? 'อื่น ๆ' : 'Other') : slice.asset}</strong><small className={valuesVisible ? undefined : 'value-concealed'}>{money.format(slice.value)}</small></span>
-              <span>{slice.share.toFixed(1)}%</span>
+              <button aria-pressed={selected === slice} className="allocation-legend-row" onClick={() => setSelectedAsset((current) => current === slice.asset ? null : slice.asset)} type="button">
+                <span aria-hidden="true" className="allocation-swatch" style={{ background: allocationColors[index % allocationColors.length] }} />
+                <span className="allocation-asset"><strong>{assetLabel(slice.asset)}</strong><small className={valuesVisible ? undefined : 'value-concealed'}>{money.format(slice.value)}</small></span>
+                <span className="allocation-share">{slice.share.toFixed(1)}%</span>
+              </button>
             </li>
           ))}
         </ul>
       </div>
     </section>
+  )
+}
+
+const PnlAssetDetails = ({ assets, language, valuesVisible }: { assets: PnlAsset[]; language: Language; valuesVisible: boolean }) => {
+  const th = language === 'th'
+  const money = currency(language)
+  const monetaryValue = (value: number | null) => value === null ? '—' : money.format(value)
+  const profit = (value: number | null) => value === null ? '—' : `${value >= 0 ? '+' : ''}${money.format(value)}`
+  const concealed = valuesVisible ? undefined : 'value-concealed'
+  const pnlValue = (value: number | null) => <span className={value === null || value === 0 ? undefined : value > 0 ? 'pnl-positive' : 'pnl-negative'}>{profit(value)}</span>
+  const labels = {
+    quantity: th ? 'จำนวน' : 'Quantity',
+    current: th ? 'มูลค่าปัจจุบัน' : 'Current value',
+    cost: th ? 'ต้นทุน / ราคาเฉลี่ย' : 'Cost basis / average',
+    realized: th ? 'กำไรที่เกิดแล้ว' : 'Realized P&L',
+    unrealized: th ? 'กำไรที่ยังไม่เกิด' : 'Unrealized P&L',
+    total: th ? 'P&L รวม' : 'Total P&L',
+    status: th ? 'สถานะ' : 'Status',
+  }
+  const statuses = {
+    ready: th ? 'พร้อม' : 'Ready',
+    missing_cost_basis: th ? 'ต้องระบุต้นทุน' : 'Cost basis needed',
+    missing_history: th ? 'ขาดประวัติ' : 'History needed',
+    unsupported_quote: th ? 'คู่ที่ยังไม่รองรับ' : 'Unsupported pair',
+    missing_price: th ? 'ขาดราคา' : 'Price needed',
+    quantity_mismatch: th ? 'ยอดไม่ตรงกับ Bitkub' : 'Balance mismatch',
+  }
+  const rows = assets.map((asset) => {
+    const fields = [
+      { label: labels.quantity, content: quantity.format(asset.quantity) },
+      { label: labels.current, content: monetaryValue(asset.currentValue) },
+      { label: labels.cost, content: asset.costBasis === null ? '—' : <>
+        {money.format(asset.costBasis)}
+        <small>{asset.averageCost === null ? (th ? 'ปิดสถานะแล้ว' : 'Closed') : `${th ? 'เฉลี่ย' : 'Avg'} ${money.format(asset.averageCost)}`}</small>
+      </> },
+      { label: labels.realized, content: pnlValue(asset.realizedPnl) },
+      { label: labels.unrealized, content: pnlValue(asset.unrealizedPnl) },
+    ]
+    const tone = asset.totalPnl === null || asset.totalPnl === 0 ? '' : asset.totalPnl > 0 ? 'pnl-positive' : 'pnl-negative'
+    const total = <span className={tone}>{profit(asset.totalPnl)}{asset.pnlPercent === null ? null : <small>{asset.pnlPercent >= 0 ? '+' : ''}{asset.pnlPercent.toFixed(2)}%</small>}</span>
+    const status = <span className={`pnl-status pnl-status-${asset.status}`}>{statuses[asset.status]}</span>
+
+    return { asset, fields, status, total }
+  })
+  const accessibleLabel = th ? 'รายละเอียดกำไรขาดทุนรายเหรียญ' : 'P&L by asset'
+
+  return (
+    <div className="pnl-assets" id="pnl-assets" role="region" aria-label={accessibleLabel}>
+      <div className="pnl-asset-table">
+        <table aria-label={accessibleLabel}>
+          <thead>
+            <tr>
+              <th scope="col">{th ? 'เหรียญ' : 'Asset'}</th>
+              {Object.values(labels).map((label) => <th key={label} scope="col">{label}</th>)}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map(({ asset, fields, status, total }) => <tr key={asset.asset}>
+              <th scope="row">{asset.asset}</th>
+              {fields.map(({ content, label }) => <td className={concealed} key={label}>{content}</td>)}
+              <td className={concealed}>{total}</td>
+              <td>{status}</td>
+            </tr>)}
+          </tbody>
+        </table>
+      </div>
+      <ul className="pnl-asset-list" role="list">
+        {rows.map(({ asset, fields, status, total }) => <li key={asset.asset}>
+          <details>
+            <summary className="pnl-asset-summary">
+              <span className="pnl-asset-identity">
+                <strong className="asset-symbol"><AssetIcon asset={asset.asset} />{asset.asset}</strong>
+                {asset.status === 'ready' ? <span className={concealed}>{quantity.format(asset.quantity)} {asset.asset}</span> : status}
+              </span>
+              <span className="pnl-asset-headline">
+                <span>{labels.total}</span>
+                <span className={concealed}>{total}</span>
+              </span>
+              <ChevronRightIcon aria-hidden="true" height={16} width={16} />
+            </summary>
+            <dl className="pnl-asset-fields">
+              {(asset.status === 'ready' ? fields.slice(1) : fields).map(({ content, label }) => <div key={label}>
+                <dt>{label}</dt><dd className={concealed}>{content}</dd>
+              </div>)}
+              <div><dt>{labels.status}</dt><dd>{status}</dd></div>
+            </dl>
+          </details>
+        </li>)}
+      </ul>
+    </div>
   )
 }
 
@@ -311,7 +423,6 @@ const PnlPanel = ({ ignoredAssets, language, onSaveCostBasis, pnl, valuesVisible
   pnl: PnlSummaryData
   valuesVisible: boolean
 }) => {
-  const [assetCandidate, setAssetCandidate] = useState('')
   const [selectedAssets, setSelectedAssets] = useState(() => resolvePnlView().selectedAssets)
   const [costBasisOpen, setCostBasisOpen] = useState(false)
   const [detailsOpen, setDetailsOpen] = useState(true)
@@ -384,28 +495,32 @@ const PnlPanel = ({ ignoredAssets, language, onSaveCostBasis, pnl, valuesVisible
         </div>
       </div>
       <div className="pnl-controls">
-        <label>{language === 'th' ? 'ดู' : 'View'}<select className="form-select" onChange={(event) => {
-          const nextScope = event.target.value
-          if (nextScope === 'all' || nextScope === 'closed' || nextScope === 'holdings' || nextScope === 'review') {
+        <AppSelect<PnlDisplayScope>
+          items={[
+            { value: 'holdings', label: language === 'th' ? 'เหรียญที่ยังถือ' : 'Current holdings' },
+            { value: 'closed', label: language === 'th' ? 'เหรียญที่ปิดสถานะแล้ว' : 'Closed positions' },
+            { value: 'review', label: language === 'th' ? 'รายการที่ต้องตรวจสอบ' : 'Needs review' },
+            { value: 'all', label: language === 'th' ? 'ทุกเหรียญ' : 'All assets' },
+          ]}
+          label={language === 'th' ? 'มุมมองกำไร / ขาดทุน' : 'Profit and loss view'}
+          onChange={(nextScope) => {
             setScope(nextScope)
             setSelectedAssets([])
-            setAssetCandidate('')
             setCostBasisOpen(false)
-          }
-        }} value={scope}>
-          <option value="holdings">{language === 'th' ? 'เหรียญที่ยังถือ' : 'Current holdings'}</option>
-          <option value="closed">{language === 'th' ? 'เหรียญที่ปิดสถานะแล้ว' : 'Closed positions'}</option>
-          <option value="review">{language === 'th' ? 'รายการที่ต้องตรวจสอบ' : 'Needs review'}</option>
-          <option value="all">{language === 'th' ? 'ทุกเหรียญ' : 'All assets'}</option>
-        </select></label>
-        <label>{language === 'th' ? 'เลือกเหรียญ' : 'Select asset'}<select className="form-select" onChange={(event) => {
-          const asset = event.target.value
-          if (asset && !selectedAssets.includes(asset)) setSelectedAssets((current) => [...current, asset])
-          setAssetCandidate('')
-        }} value={assetCandidate}>
-          <option value="">{language === 'th' ? 'ทั้งหมดในมุมมองนี้' : 'All assets in this view'}</option>
-          {scopeAssets.filter((asset) => !selectedAssets.includes(asset.asset)).map((asset) => <option key={asset.asset} value={asset.asset}>{asset.asset}</option>)}
-        </select></label>
+          }}
+          value={scope}
+        />
+        <AppSelect
+          items={[
+            { value: '', label: language === 'th' ? 'เลือกเหรียญ' : 'Select assets' },
+            ...scopeAssets.filter((asset) => !selectedAssets.includes(asset.asset)).map(({ asset }) => ({ value: asset, label: asset })),
+          ]}
+          label={language === 'th' ? 'เลือกเหรียญสำหรับคำนวณ P&L' : 'Select assets for profit and loss'}
+          onChange={(asset) => {
+            if (asset) setSelectedAssets((current) => current.includes(asset) ? current : [...current, asset])
+          }}
+          value=""
+        />
       </div>
       {selectedAssets.length > 0 ? <div className="pnl-selected-assets" aria-label={language === 'th' ? 'เหรียญที่เลือก' : 'Selected assets'}>
         <span>{language === 'th' ? 'กำลังคำนวณ' : 'Calculating'}</span>
@@ -429,7 +544,7 @@ const PnlPanel = ({ ignoredAssets, language, onSaveCostBasis, pnl, valuesVisible
             {missingCostBasis.map((transfer) => (
             <form key={transfer.transferId} onSubmit={(event) => { event.preventDefault(); void save(transfer.transferId) }}>
               <span>{transfer.asset} · <span className={valuesVisible ? undefined : 'value-concealed'}>{quantity.format(transfer.amount)}</span> · {dateTime(language).format(transfer.executedAt)}</span>
-              <label><span className="sr-only">{language === 'th' ? 'ต้นทุนรวม THB' : 'Total THB cost basis'}</span><input inputMode="decimal" min="0" onChange={(event) => setDrafts((current) => ({ ...current, [transfer.transferId]: event.target.value }))} placeholder={language === 'th' ? 'ต้นทุนรวม THB' : 'Total THB cost'} type="number" value={drafts[transfer.transferId] ?? ''} /></label>
+              <label><span className="sr-only">{language === 'th' ? 'ต้นทุนรวม THB' : 'Total THB cost basis'}</span><Input inputMode="decimal" min="0" onChange={(event) => setDrafts((current) => ({ ...current, [transfer.transferId]: event.target.value }))} placeholder={language === 'th' ? 'ต้นทุนรวม THB' : 'Total THB cost'} type="number" value={drafts[transfer.transferId] ?? ''} /></label>
               <button className="export-button" disabled={workingTransferId === transfer.transferId} type="submit">{workingTransferId === transfer.transferId ? (language === 'th' ? 'กำลังบันทึก…' : 'Saving…') : (language === 'th' ? 'บันทึก' : 'Save')}</button>
             </form>
             ))}
@@ -439,29 +554,7 @@ const PnlPanel = ({ ignoredAssets, language, onSaveCostBasis, pnl, valuesVisible
       </div> : null}
       {visibleAssets.length > 0 ? <>
         <button aria-controls="pnl-assets" aria-expanded={detailsOpen} className="pnl-details-toggle" onClick={() => setDetailsOpen((open) => !open)} type="button">{detailsOpen ? (language === 'th' ? 'ซ่อนรายละเอียดรายเหรียญ' : 'Hide asset details') : (language === 'th' ? `แสดงรายละเอียดรายเหรียญ (${visibleAssets.length})` : `Show asset details (${visibleAssets.length})`)}</button>
-        {detailsOpen ? <div className="pnl-assets" id="pnl-assets" role="region" aria-label={language === 'th' ? 'รายละเอียดกำไรขาดทุนรายเหรียญ' : 'P&L by asset'} tabIndex={0}>
-        <table>
-          <thead><tr><th>{language === 'th' ? 'เหรียญ' : 'Asset'}</th><th>{language === 'th' ? 'จำนวน' : 'Quantity'}</th><th>{language === 'th' ? 'มูลค่าปัจจุบัน' : 'Current value'}</th><th>{language === 'th' ? 'ต้นทุน / ราคาเฉลี่ย' : 'Cost basis / average'}</th><th>{language === 'th' ? 'กำไรที่เกิดแล้ว' : 'Realized'}</th><th>{language === 'th' ? 'กำไรที่ยังไม่เกิด' : 'Unrealized'}</th><th>{language === 'th' ? 'รวม / ผลตอบแทน' : 'Total / return'}</th><th>{language === 'th' ? 'สถานะ' : 'Status'}</th></tr></thead>
-          <tbody>{visibleAssets.map((asset) => {
-            const status = asset.status === 'ready' ? (language === 'th' ? 'พร้อม' : 'Ready')
-              : asset.status === 'missing_cost_basis' ? (language === 'th' ? 'ต้องระบุต้นทุน' : 'Cost basis needed')
-                : asset.status === 'missing_history' ? (language === 'th' ? 'ขาดประวัติ' : 'History needed')
-                  : asset.status === 'unsupported_quote' ? (language === 'th' ? 'คู่ที่ยังไม่รองรับ' : 'Unsupported pair')
-                    : asset.status === 'missing_price' ? (language === 'th' ? 'ขาดราคา' : 'Price needed')
-                      : (language === 'th' ? 'ยอดไม่ตรงกับ Bitkub' : 'Balance mismatch')
-            return <tr key={asset.asset}>
-              <td>{asset.asset}</td>
-              <td className={valuesVisible ? undefined : 'value-concealed'}>{quantity.format(asset.quantity)}</td>
-              <td className={valuesVisible ? undefined : 'value-concealed'}>{asset.currentValue === null ? '—' : money.format(asset.currentValue)}</td>
-              <td className={valuesVisible ? undefined : 'value-concealed'}>{asset.costBasis === null ? '—' : <><span>{money.format(asset.costBasis)}</span><small>{asset.averageCost === null ? (language === 'th' ? 'ปิดสถานะแล้ว' : 'Closed') : `${language === 'th' ? 'เฉลี่ย' : 'Avg'} ${money.format(asset.averageCost)}`}</small></>}</td>
-              <td className={`${pnlTone(asset.realizedPnl)}${valuesVisible ? '' : ' value-concealed'}`}>{asset.realizedPnl === null ? '—' : signedMoney(asset.realizedPnl)}</td>
-              <td className={`${pnlTone(asset.unrealizedPnl)}${valuesVisible ? '' : ' value-concealed'}`}>{asset.unrealizedPnl === null ? '—' : signedMoney(asset.unrealizedPnl)}</td>
-              <td className={`${pnlTone(asset.totalPnl)}${valuesVisible ? '' : ' value-concealed'}`}>{asset.totalPnl === null ? '—' : <><span>{signedMoney(asset.totalPnl)}</span><small>{asset.pnlPercent === null ? '—' : signedPercent(asset.pnlPercent)}</small></>}</td>
-              <td><span className={`pnl-status pnl-status-${asset.status}`}>{status}</span></td>
-            </tr>
-          })}</tbody>
-        </table>
-        </div> : null}
+        {detailsOpen ? <PnlAssetDetails assets={visibleAssets} language={language} valuesVisible={valuesVisible} /> : null}
       </> : <p className="pnl-note">{language === 'th' ? 'ไม่มีเหรียญในมุมมองนี้' : 'No assets in this view.'}</p>}
       {message ? <p className="inline-status">{message}</p> : null}
     </section>
@@ -525,7 +618,6 @@ const AllocationTargets = ({ holdings, language, onRemove, onSave, targets }: {
     <section className="allocation-targets" aria-labelledby="allocation-targets-title">
       <div className="section-heading">
         <div>
-          <p className="eyebrow">Allocation targets</p>
           <h2 id="allocation-targets-title">{language === 'th' ? 'เป้าหมายสัดส่วนพอร์ต' : 'Allocation targets'}</h2>
           <p className="allocation-note">{language === 'th' ? `ตั้งได้รวมไม่เกิน 100% · เหลือ ${Math.max(0, 100 - totalTarget).toFixed(1)}% เป็นส่วนที่ยังไม่กำหนด` : `Targets may total up to 100% · ${Math.max(0, 100 - totalTarget).toFixed(1)}% remains unallocated.`}</p>
         </div>
@@ -536,13 +628,19 @@ const AllocationTargets = ({ holdings, language, onRemove, onSave, targets }: {
           const current = currentShare(asset)
           const draft = drafts[asset] ?? (target === undefined ? '' : String(target))
           return (
-            <div className="allocation-target-row" key={asset}>
+            <form className="allocation-target-row" key={asset} onSubmit={(event) => { event.preventDefault(); void save(asset) }}>
               <strong>{asset}</strong>
-              <span>{language === 'th' ? `ปัจจุบัน ${current.toFixed(1)}%` : `Current ${current.toFixed(1)}%`}</span>
-              <label className="percent-input"><span className="sr-only">{language === 'th' ? `เป้าหมาย ${asset}` : `${asset} target`}</span><input autoComplete="off" inputMode="decimal" maxLength={6} onChange={(event) => { if (isDecimalDraft(event.target.value)) setDrafts((currentDrafts) => ({ ...currentDrafts, [asset]: event.target.value })) }} pattern="[0-9]*[.,]?[0-9]*" placeholder="0.0" type="text" value={draft} /><span aria-hidden="true">%</span></label>
-              <button className="export-button" disabled={workingAsset === asset} onClick={() => void save(asset)} type="button">{target === undefined ? (language === 'th' ? 'ตั้งเป้า' : 'Set') : (language === 'th' ? 'บันทึก' : 'Save')}</button>
-              {target !== undefined ? <button className="text-button" disabled={workingAsset === asset} onClick={() => void remove(asset)} type="button">{language === 'th' ? 'ลบ' : 'Remove'}</button> : null}
-            </div>
+              <span className="allocation-current">{language === 'th' ? `ปัจจุบัน ${current.toFixed(1)}%` : `Current ${current.toFixed(1)}%`}</span>
+              <label className="unit-input percent-input">
+                <span className="sr-only">{language === 'th' ? `เป้าหมาย ${asset} (%)` : `${asset} target (%)`}</span>
+                <Input autoComplete="off" inputMode="decimal" maxLength={6} onChange={(event) => { if (isDecimalDraft(event.target.value)) setDrafts((currentDrafts) => ({ ...currentDrafts, [asset]: event.target.value })) }} pattern="[0-9]*[.,]?[0-9]*" placeholder="0.0" type="text" value={draft} />
+                <span aria-hidden="true">%</span>
+              </label>
+              <div className="allocation-target-actions">
+                <Button className="export-button" disabled={workingAsset === asset} type="submit">{target === undefined ? (language === 'th' ? 'ตั้งเป้า' : 'Set') : (language === 'th' ? 'บันทึก' : 'Save')}</Button>
+                {target !== undefined ? <Button aria-label={language === 'th' ? `ลบเป้าหมาย ${asset}` : `Remove ${asset} target`} className="export-button secondary-action" disabled={workingAsset === asset} onClick={() => void remove(asset)} type="button">{language === 'th' ? 'ลบ' : 'Remove'}</Button> : null}
+              </div>
+            </form>
           )
         })}
       </div>
@@ -603,7 +701,6 @@ const RebalanceAssistant = ({ holdings, language, targets, valuesVisible }: {
     <section aria-labelledby="rebalance-title" className="rebalance-assistant">
       <div className="section-heading">
         <div>
-          <p className="eyebrow">Rebalance check</p>
           <h2 id="rebalance-title">{language === 'th' ? 'เทียบสัดส่วนกับเป้าหมาย' : 'Compare with targets'}</h2>
           <p className="allocation-note">{language === 'th' ? 'คำนวณจากมูลค่าประเมินปัจจุบันและเป้าหมายที่ตั้งไว้เท่านั้น ไม่มีคำสั่งซื้อ ขาย หรือโอนสินทรัพย์' : 'A read-only comparison of current estimated value and your targets. It cannot buy, sell, or transfer assets.'}</p>
         </div>
@@ -643,7 +740,7 @@ const RebalanceAssistant = ({ holdings, language, targets, valuesVisible }: {
   )
 }
 
-const TrackedPrices = ({ holdings, language, onAddAlert, onAddAsset, onRemoveAlert, onRemoveAsset, priceAlerts, watchlist }: {
+const TrackedPrices = ({ holdings, language, onAddAlert, onAddAsset, onRemoveAlert, onRemoveAsset, priceAlerts, valuesVisible, watchlist }: {
   holdings: Holding[]
   language: Language
   onAddAlert: (asset: string, direction: 'above' | 'below', targetPrice: number) => Promise<void>
@@ -651,6 +748,7 @@ const TrackedPrices = ({ holdings, language, onAddAlert, onAddAsset, onRemoveAle
   onRemoveAlert: (id: string) => Promise<void>
   onRemoveAsset: (asset: string) => Promise<void>
   priceAlerts: PriceAlert[]
+  valuesVisible: boolean
   watchlist: WatchlistAsset[]
 }) => {
   const [asset, setAsset] = useState('')
@@ -683,6 +781,7 @@ const TrackedPrices = ({ holdings, language, onAddAlert, onAddAsset, onRemoveAle
   }
 
   const addAlert = async () => {
+    if (!valuesVisible) return
     const price = parseDecimal(targetPrice)
     if (!asset || !Number.isFinite(price) || price <= 0) {
       setMessage(language === 'th' ? 'ระบุราคาเป้าหมายที่มากกว่า 0' : 'Enter a target price above zero.')
@@ -728,22 +827,37 @@ const TrackedPrices = ({ holdings, language, onAddAlert, onAddAsset, onRemoveAle
     <section className="tracked-prices" aria-labelledby="tracked-prices-title">
       <div className="section-heading">
         <div>
-          <p className="eyebrow">Watchlist</p>
           <h2 id="tracked-prices-title">{language === 'th' ? 'ติดตามราคาและตั้งแจ้งเตือน' : 'Watch prices and set alerts'}</h2>
           <p className="allocation-note">{language === 'th' ? 'แจ้งเตือนเมื่อราคา THB แตะเป้าหมายระหว่างการ sync และต้องเปิด Push ประเภท “ราคาแตะเป้าหมาย” ในการตั้งค่า' : 'Alerts are checked during sync. Enable “Price alerts” in notification settings to receive them.'}</p>
         </div>
       </div>
       {availableAssets.length > 0 ? <div className="tracked-price-controls">
-        <label><span>{language === 'th' ? 'สินทรัพย์' : 'Asset'}</span><select className="form-select" onChange={(event) => { setAsset(event.target.value); setMessage(null) }} value={asset}>{availableAssets.map((availableAsset) => <option key={availableAsset} value={availableAsset}>{availableAsset}</option>)}</select></label>
-        <button className="export-button" disabled={isWorking || watchlist.some((item) => item.asset === asset)} onClick={() => void addWatch()} type="button">{watchlist.some((item) => item.asset === asset) ? (language === 'th' ? 'กำลังติดตามอยู่' : 'Watching') : (language === 'th' ? 'เพิ่มในรายการติดตาม' : 'Add to watchlist')}</button>
-        <div className="alert-composer">
-          <select aria-label={language === 'th' ? 'เงื่อนไขราคา' : 'Price condition'} className="form-select" onChange={(event) => setDirection(event.target.value as 'above' | 'below')} value={direction}><option value="above">{language === 'th' ? 'ราคา ≥' : 'Price ≥'}</option><option value="below">{language === 'th' ? 'ราคา ≤' : 'Price ≤'}</option></select>
-          <label className="currency-input"><span className="sr-only">{language === 'th' ? 'ราคาเป้าหมาย THB' : 'Target THB price'}</span><input autoComplete="off" inputMode="decimal" onChange={(event) => { if (isDecimalDraft(event.target.value)) setTargetPrice(event.target.value) }} pattern="[0-9]*[.,]?[0-9]*" placeholder={language === 'th' ? 'ราคาเป้าหมาย' : 'Target price'} type="text" value={targetPrice} /><span aria-hidden="true">THB</span></label>
-          <button className="export-button" disabled={isWorking} onClick={() => void addAlert()} type="button">{language === 'th' ? 'สร้างแจ้งเตือน' : 'Create alert'}</button>
+        <div className="tracked-asset-picker">
+          <AppSelect
+            items={availableAssets.map((symbol) => ({ label: symbol, value: symbol }))}
+            label={language === 'th' ? 'สินทรัพย์' : 'Asset'}
+            onChange={(nextAsset) => { setAsset(nextAsset); setMessage(null) }}
+            value={asset}
+          />
+          <Button className="export-button" disabled={isWorking || watchlist.some((item) => item.asset === asset)} onClick={() => void addWatch()} type="button">{watchlist.some((item) => item.asset === asset) ? (language === 'th' ? 'กำลังติดตามอยู่' : 'Watching') : (language === 'th' ? 'เพิ่มในรายการติดตาม' : 'Add to watchlist')}</Button>
         </div>
+        <form className="alert-composer" onSubmit={(event) => { event.preventDefault(); void addAlert() }}>
+          <AppSelect<'above' | 'below'>
+            items={[{ label: language === 'th' ? 'ราคา ≥' : 'Price ≥', value: 'above' }, { label: language === 'th' ? 'ราคา ≤' : 'Price ≤', value: 'below' }]}
+            label={language === 'th' ? 'เงื่อนไขราคา' : 'Price condition'}
+            onChange={setDirection}
+            value={direction}
+          />
+          <label className="unit-input currency-input">
+            <span className="sr-only">{language === 'th' ? 'ราคาเป้าหมาย THB' : 'Target THB price'}</span>
+            <Input autoComplete="off" disabled={!valuesVisible} inputMode="decimal" onChange={(event) => { if (isDecimalDraft(event.target.value)) setTargetPrice(event.target.value) }} pattern="[0-9]*[.,]?[0-9]*" placeholder={valuesVisible ? (language === 'th' ? 'ราคาเป้าหมาย' : 'Target price') : (language === 'th' ? 'ซ่อนราคาอยู่' : 'Prices hidden')} type="text" value={valuesVisible ? targetPrice : ''} />
+            <span aria-hidden="true">THB</span>
+          </label>
+          <Button className="export-button" disabled={isWorking || !valuesVisible} type="submit">{language === 'th' ? 'สร้างแจ้งเตือน' : 'Create alert'}</Button>
+        </form>
       </div> : null}
-      {watchlist.length > 0 ? <div className="watchlist-grid">{watchlist.map((item) => <article className="watchlist-item" key={item.asset}><strong>{item.asset}</strong><span>{item.price === null ? (language === 'th' ? 'ยังไม่มีราคา' : 'No price yet') : currency(language).format(item.price)}</span><button className="text-button" disabled={isWorking} onClick={() => void removeWatch(item.asset)} type="button">{language === 'th' ? 'เอาออก' : 'Remove'}</button></article>)}</div> : null}
-      {priceAlerts.length > 0 ? <ul className="price-alert-list">{priceAlerts.map((alert) => <li key={alert.id}><span><strong>{alert.asset}</strong> · {alert.direction === 'above' ? (language === 'th' ? '≥' : '≥') : '≤'} {currency(language).format(alert.target_price)} {alert.active === 1 ? '' : `· ${language === 'th' ? 'ปิดอยู่' : 'Off'}`}</span><button className="text-button" disabled={isWorking} onClick={() => void removeAlert(alert.id)} type="button">{language === 'th' ? 'ลบ' : 'Remove'}</button></li>)}</ul> : null}
+      {watchlist.length > 0 ? <div className="watchlist-grid">{watchlist.map((item) => <article className="watchlist-item" key={item.asset}><strong>{item.asset}</strong><span>{item.price === null ? (language === 'th' ? 'ยังไม่มีราคา' : 'No price yet') : valuesVisible ? currency(language).format(item.price) : '—'}</span><button className="text-button" disabled={isWorking} onClick={() => void removeWatch(item.asset)} type="button">{language === 'th' ? 'เอาออก' : 'Remove'}</button></article>)}</div> : null}
+      {priceAlerts.length > 0 ? <ul className="price-alert-list">{priceAlerts.map((alert) => <li key={alert.id}><span><strong>{alert.asset}</strong> · {alert.direction === 'above' ? '≥' : '≤'} {valuesVisible ? currency(language).format(alert.target_price) : '—'} {alert.active === 1 ? '' : `· ${language === 'th' ? 'ปิดอยู่' : 'Off'}`}</span><button className="text-button" disabled={isWorking} onClick={() => void removeAlert(alert.id)} type="button">{language === 'th' ? 'ลบ' : 'Remove'}</button></li>)}</ul> : null}
       {message ? <p className="inline-status" role="status">{message}</p> : null}
     </section>
   )
@@ -904,6 +1018,16 @@ const createPortfolioCardImage = ({ createdAt, holdings, language, pnlAsset, pnl
   })
 }
 
+const LazyAppOverlay = lazy(() => import('./app-overlay'))
+
+const AppOverlay = (props: ComponentProps<typeof LazyAppOverlay>) => {
+  const [opened, setOpened] = useState(props.open)
+  if (props.open && !opened) setOpened(true)
+  if (!props.open && !opened) return null
+
+  return <Suspense fallback={null}><LazyAppOverlay {...props} /></Suspense>
+}
+
 const PortfolioCardDialog = ({ holdings, ignoredPnlAssets, language, onClose, open, pnl, totalValue }: {
   holdings: Holding[]
   ignoredPnlAssets: readonly string[]
@@ -913,7 +1037,7 @@ const PortfolioCardDialog = ({ holdings, ignoredPnlAssets, language, onClose, op
   pnl: PnlSummaryData
   totalValue: number
 }) => {
-  const dialogRef = useRef<HTMLDialogElement>(null)
+  const popupRef = useRef<HTMLDivElement>(null)
   const [preset, setPreset] = useState<PortfolioCardPreset>('private')
   const [pnlAssetName, setPnlAssetName] = useState('')
   const [pnlScope, setPnlScope] = useState<'asset' | 'selection'>('asset')
@@ -926,9 +1050,7 @@ const PortfolioCardDialog = ({ holdings, ignoredPnlAssets, language, onClose, op
   const [isWorking, setIsWorking] = useState(false)
 
   useEffect(() => {
-    const dialog = dialogRef.current
-    if (!dialog) return
-    if (open && !dialog.open) {
+    if (open) {
       setPreset('private')
       setPnlAssetName('')
       setPnlScope('asset')
@@ -938,9 +1060,7 @@ const PortfolioCardDialog = ({ holdings, ignoredPnlAssets, language, onClose, op
       setShowPnlCurrentValue(true)
       setShowPnlPercent(true)
       setStatus(null)
-      dialog.showModal()
     }
-    if (!open && dialog.open) dialog.close()
   }, [open])
 
   const includedPnlAssets = useMemo(() => filterPnlAssets(pnl.assets, 'all', [], ignoredPnlAssets), [ignoredPnlAssets, pnl.assets])
@@ -1050,17 +1170,15 @@ const PortfolioCardDialog = ({ holdings, ignoredPnlAssets, language, onClose, op
   })
 
   return (
-    <dialog aria-labelledby="portfolio-card-title" className="portfolio-card-dialog" onCancel={(event) => { event.preventDefault(); dialogRef.current?.close() }} onClose={onClose} ref={dialogRef}>
-      <div className="portfolio-card-drawer">
-        <div className="portfolio-card-drawer-handle" aria-hidden="true" />
-        <div className="portfolio-card-dialog-heading">
-          <div>
-            <p className="eyebrow">Portfolio card</p>
-            <h2 id="portfolio-card-title">{language === 'th' ? 'สร้างรูปสรุปพอร์ต' : 'Create portfolio image'}</h2>
-            <p>{language === 'th' ? 'รูปถูกสร้างในเบราว์เซอร์นี้เท่านั้น และไม่มีลิงก์สาธารณะ' : 'The image is created only in this browser. No public link is made.'}</p>
-          </div>
-          <button aria-label={language === 'th' ? 'ปิด' : 'Close'} className="portfolio-card-close" onClick={() => dialogRef.current?.close()} type="button">×</button>
-        </div>
+    <AppOverlay
+      closeLabel={language === 'th' ? 'ปิด' : 'Close'}
+      description={language === 'th' ? 'รูปถูกสร้างในเบราว์เซอร์นี้เท่านั้น และไม่มีลิงก์สาธารณะ' : 'The image is created only in this browser. No public link is made.'}
+      onClose={onClose}
+      open={open}
+      popupRef={popupRef}
+      title={language === 'th' ? 'สร้างรูปสรุปพอร์ต' : 'Create portfolio image'}
+    >
+      <div className="portfolio-card-content">
         <fieldset className="portfolio-card-presets">
           <legend>{language === 'th' ? 'ข้อมูลในรูป' : 'Image contents'}</legend>
           <label className={preset === 'private' ? 'portfolio-card-preset active' : 'portfolio-card-preset'}>
@@ -1081,7 +1199,13 @@ const PortfolioCardDialog = ({ holdings, ignoredPnlAssets, language, onClose, op
             <button aria-pressed={pnlScope === 'selection'} className={pnlScope === 'selection' ? 'active' : undefined} disabled={!selectedPnlGroup} onClick={() => setPnlScope('selection')} type="button">{language === 'th' ? `เหรียญที่เลือก (${includedPnlAssets.length})` : `Included assets (${includedPnlAssets.length})`}</button>
             <button aria-pressed={pnlScope === 'asset'} className={pnlScope === 'asset' ? 'active' : undefined} onClick={() => setPnlScope('asset')} type="button">{language === 'th' ? 'รายเหรียญ' : 'One asset'}</button>
           </div>
-          {pnlScope === 'asset' ? <label>{language === 'th' ? 'เหรียญ' : 'Asset'}<select className="form-select" onChange={(event) => setPnlAssetName(event.target.value)} value={selectedPnlAsset.asset}>{readyPnlAssets.map((asset) => <option key={asset.asset} value={asset.asset}>{asset.asset}</option>)}</select></label> : null}
+          {pnlScope === 'asset' ? <AppSelect
+            container={popupRef}
+            items={readyPnlAssets.map(({ asset }) => ({ label: asset, value: asset }))}
+            label={language === 'th' ? 'เหรียญ' : 'Asset'}
+            onChange={setPnlAssetName}
+            value={selectedPnlAsset.asset}
+          /> : null}
           <div aria-label={language === 'th' ? 'สิ่งที่จะแสดงในรูป' : 'P&L fields to show'} className="portfolio-card-field-toggles" role="group">
             <button aria-pressed={showPnlAmount} className={showPnlAmount ? 'active' : undefined} onClick={() => setShowPnlAmount((visible) => showPnlPercent ? !visible : true)} type="button">{language === 'th' ? 'กำไร/ขาดทุน (THB)' : 'P&L amount (THB)'}</button>
             <button aria-pressed={showPnlPercent} className={showPnlPercent ? 'active' : undefined} onClick={() => setShowPnlPercent((visible) => showPnlAmount ? !visible : true)} type="button">{language === 'th' ? 'ผลตอบแทน (%)' : 'Return (%)'}</button>
@@ -1100,7 +1224,7 @@ const PortfolioCardDialog = ({ holdings, ignoredPnlAssets, language, onClose, op
         </div>
         <p aria-live="polite" className="portfolio-card-status">{status}</p>
       </div>
-    </dialog>
+    </AppOverlay>
   )
 }
 
@@ -1116,6 +1240,7 @@ const HoldingSparkline = ({ asset, language, points, valuesVisible }: { asset: s
     y: 94 - ((value - minimum) / range) * 82,
   }))
   const latest = values.at(-1)!
+  const latestCoordinate = coordinates.at(-1)!
   const change = latest - values[0]!
   const percentage = values[0] === 0 ? null : (change / values[0]!) * 100
   const trend = change > 0 ? 'positive' : change < 0 ? 'negative' : 'neutral'
@@ -1125,10 +1250,13 @@ const HoldingSparkline = ({ asset, language, points, valuesVisible }: { asset: s
   return (
     <div aria-label={language === 'th' ? `กราฟราคา ${asset} ใน 24 ชั่วโมง เปลี่ยนแปลง ${percentage?.toFixed(2) ?? '0'} เปอร์เซ็นต์` : `${asset} price over 24 hours, changed ${percentage?.toFixed(2) ?? '0'} percent`} className={`holding-sparkline ${trend}${valuesVisible ? '' : ' value-concealed'}`} role="img">
       <span>{language === 'th' ? 'กราฟ 24 ชม.' : '24h trend'} {percentage === null ? '' : `${percentage >= 0 ? '+' : ''}${percentage.toFixed(2)}%`}</span>
-      <svg aria-hidden="true" preserveAspectRatio="none" viewBox="0 0 100 100">
-        <polygon className="holding-sparkline-area" points={area} />
-        <polyline className="holding-sparkline-line" fill="none" points={line} vectorEffect="non-scaling-stroke" />
-      </svg>
+      <div aria-hidden="true" className="holding-sparkline-plot">
+        <svg preserveAspectRatio="none" viewBox="0 0 100 100">
+          <polygon className="holding-sparkline-area" points={area} />
+          <polyline className="holding-sparkline-line" fill="none" points={line} vectorEffect="non-scaling-stroke" />
+        </svg>
+        {valuesVisible ? <span className="chart-point" style={{ left: '100%', top: `${latestCoordinate.y}%` }} /> : null}
+      </div>
     </div>
   )
 }
@@ -1178,7 +1306,6 @@ const Holdings = ({ holdings, language, onDownloadBackup, onOpenPortfolioCard, o
     <section className="holdings" aria-label="Holdings">
       <div className="section-heading">
         <div>
-          <p className="eyebrow">Holdings</p>
           <h2>{language === 'th' ? 'สินทรัพย์ในพอร์ต' : 'Portfolio holdings'}</h2>
         </div>
         <div className="section-actions">
@@ -1191,16 +1318,21 @@ const Holdings = ({ holdings, language, onDownloadBackup, onOpenPortfolioCard, o
       <div className="holding-controls">
         <label className="holding-search">
           <span className="sr-only">{language === 'th' ? 'ค้นหาสินทรัพย์' : 'Search assets'}</span>
-          <input onChange={(event) => setQuery(event.target.value)} placeholder={language === 'th' ? 'ค้นหาสินทรัพย์' : 'Search assets'} type="search" value={query} />
+          <Input onChange={(event) => setQuery(event.target.value)} placeholder={language === 'th' ? 'ค้นหาสินทรัพย์' : 'Search assets'} type="search" value={query} />
         </label>
-        <label className="sort-control">
+        <div className="sort-control">
           <span>{language === 'th' ? 'เรียงตาม' : 'Sort by'}</span>
-          <select onChange={(event) => setSort(event.target.value as HoldingSort)} value={sort}>
-            <option value="value">{language === 'th' ? 'มูลค่า' : 'Value'}</option>
-            <option value="quantity">{language === 'th' ? 'จำนวน' : 'Quantity'}</option>
-            <option value="asset">{language === 'th' ? 'ชื่อสินทรัพย์' : 'Asset'}</option>
-          </select>
-        </label>
+          <AppSelect<HoldingSort>
+            items={[
+              { value: 'value', label: language === 'th' ? 'มูลค่า' : 'Value' },
+              { value: 'quantity', label: language === 'th' ? 'จำนวน' : 'Quantity' },
+              { value: 'asset', label: language === 'th' ? 'ชื่อสินทรัพย์' : 'Asset name' },
+            ]}
+            label={language === 'th' ? 'เรียงสินทรัพย์ตาม' : 'Sort holdings by'}
+            onChange={setSort}
+            value={sort}
+          />
+        </div>
         <label className="zero-toggle">
           <input checked={showZero} onChange={(event) => setShowZero(event.target.checked)} type="checkbox" />
           <span>{language === 'th' ? 'แสดงยอดศูนย์' : 'Show zero balances'}</span>
@@ -1211,14 +1343,18 @@ const Holdings = ({ holdings, language, onDownloadBackup, onOpenPortfolioCard, o
           {sortedHoldings.map((holding) => (
             <button aria-label={`${language === 'th' ? 'ดูรายละเอียด' : 'View details'} ${holding.asset}`} className="holding" key={`${holding.account_id}-${holding.asset}`} onClick={() => onSelectAsset(holding.asset)} type="button">
               <div className="holding-identity">
-                <p className="asset">{holding.asset}</p>
-                <p className="account">{holding.account_label}</p>
+                <AssetIcon asset={holding.asset} />
+                <div>
+                  <p className="asset">{holding.asset}</p>
+                  <p className="account">{holding.account_label}</p>
+                </div>
               </div>
               <div className="holding-quantity">
                 <p className={valuesVisible ? undefined : 'value-concealed'}>{quantity.format(holdingAmount(holding))}</p>
                 <span className={valuesVisible ? undefined : 'value-concealed'}>{money.format(valueOf(holding.available, holding.reserved, holding.price))}</span>
               </div>
               <HoldingSparkline asset={holding.asset} language={language} points={priceHistories[holding.asset] ?? []} valuesVisible={valuesVisible} />
+              <ChevronRightIcon className="holding-chevron" height={16} width={16} />
             </button>
           ))}
         </div>
@@ -1248,10 +1384,7 @@ const AssetDetail = ({ accountId, asset, holdings, language, onClose, pnlAsset, 
     <section className="asset-detail" aria-label={`${language === 'th' ? 'รายละเอียด' : 'Details'} ${asset}`}>
       <button className="back-link" onClick={onClose} type="button">← {language === 'th' ? 'กลับไปภาพรวม' : 'Back to overview'}</button>
       <div className="asset-detail-heading">
-        <div>
-          <p className="eyebrow">Asset detail</p>
-          <h1>{asset}</h1>
-        </div>
+        <h1 className="asset-symbol"><AssetIcon asset={asset} />{asset}</h1>
         <div className="asset-detail-total">
           <span>{language === 'th' ? 'มูลค่าปัจจุบัน' : 'Current value'}</span>
           <strong className={valuesVisible ? undefined : 'value-concealed'}>{money.format(totalValue)}</strong>
@@ -1293,7 +1426,7 @@ const AssetDetail = ({ accountId, asset, holdings, language, onClose, pnlAsset, 
       </div> : null}
       <AssetPriceTrend accountId={accountId} asset={asset} averageCost={pnlAsset?.status === 'ready' ? pnlAsset.averageCost : null} language={language} valuesVisible={valuesVisible} />
       <div className="asset-detail-section">
-        <p className="eyebrow">Balances</p>
+        <h2 className="asset-subheading">{language === 'th' ? 'ยอดคงเหลือรายบัญชี' : 'Account balances'}</h2>
         {assetHoldings.map((holding) => (
           <div className="asset-account" key={holding.account_id}>
             <span>{holding.account_label}</span>
@@ -1302,7 +1435,7 @@ const AssetDetail = ({ accountId, asset, holdings, language, onClose, pnlAsset, 
         ))}
       </div>
       <div className="asset-detail-section">
-        <p className="eyebrow">Recent activity</p>
+        <h2 className="asset-subheading">{language === 'th' ? 'ธุรกรรมล่าสุด' : 'Recent activity'}</h2>
         {assetTransactions.length > 0 ? assetTransactions.slice(0, 8).map((transaction) => (
           <div className="asset-activity" key={`${transaction.category}-${transaction.id}`}>
           <span>{dates.format(transaction.executed_at)} · {transactionLabel(transaction, language)}</span>
@@ -1410,19 +1543,52 @@ const hasAnyInvestedValueHistory = (points: ValueHistoryPoint[]): boolean => poi
 const hasSelectedPnlValueHistory = (points: ValueHistoryPoint[]): boolean => hasInvestedValueHistory(points) && points.every((point) => point.selected_value !== null && Number.isFinite(point.selected_value))
 const selectedPnlHistory = (points: ValueHistoryPoint[]): ValueHistoryPoint[] => points.map((point) => ({ ...point, total_value: point.selected_value ?? point.total_value }))
 
-const ValueHistoryChart = ({ chartLabel, language, points, primaryLabel, secondaryLabel, showInvestedValue = false, valuesVisible }: { chartLabel?: string; language: Language; points: ValueHistoryPoint[]; primaryLabel?: string; secondaryLabel?: string; showInvestedValue?: boolean; valuesVisible: boolean }) => {
+const chartTimeBounds = (points: ValueHistoryPoint[], buys: readonly DcaBuy[] = []) => {
+  const bounds = { from: points[0]?.snapshot_at ?? 0, to: points.at(-1)?.snapshot_at ?? 0 }
+  for (const buy of buys) {
+    bounds.from = Math.min(bounds.from, buy.executedAt)
+    bounds.to = Math.max(bounds.to, buy.executedAt)
+  }
+  return bounds
+}
+
+const ValueHistoryChart = ({ buys, chartLabel, compact = false, language, points, primaryLabel, secondaryLabel, showInvestedValue = false, valuesVisible }: { buys?: (DcaBuy & { price: number })[] | undefined; chartLabel?: string; compact?: boolean; language: Language; points: ValueHistoryPoint[]; primaryLabel?: string; secondaryLabel?: string; showInvestedValue?: boolean; valuesVisible: boolean }) => {
   const [selectedIndex, setSelectedIndex] = useState(() => Math.max(points.length - 1, 0))
+  const [selectedBuyId, setSelectedBuyId] = useState<string | null>(null)
+  const [pulseRevision, setPulseRevision] = useState(0)
+  const fillId = useId()
+  const plotRef = useRef<HTMLDivElement>(null)
+  const [plotVisible, setPlotVisible] = useState(false)
+  const hasPlot = points.length > 1
+
+  useEffect(() => {
+    const plot = plotRef.current
+    if (!hasPlot || !plot) return
+    const observer = new IntersectionObserver(([entry]) => {
+      setPlotVisible(Boolean(entry?.isIntersecting && entry.intersectionRatio >= 0.25))
+    }, { threshold: 0.25 })
+    observer.observe(plot)
+    return () => observer.disconnect()
+  }, [hasPlot])
 
   useEffect(() => {
     setSelectedIndex(Math.max(points.length - 1, 0))
   }, [points])
 
-  if (points.length < 2) return null
+  if (!hasPlot) return null
 
+  const buyMarkers = valuesVisible ? buys ?? [] : []
+  const { from: firstTime, to: lastTime } = chartTimeBounds(points, buyMarkers)
+  const timed = lastTime > firstTime
+  const selectedBuy = valuesVisible ? buyMarkers.find((buy) => buy.id === selectedBuyId) : undefined
+  const pulsingBuy = selectedBuy ?? buyMarkers.reduce<DcaBuy | undefined>(
+    (latest, buy) => !latest || buy.executedAt > latest.executedAt ? buy : latest, undefined,
+  )
   const hasInvestedValue = showInvestedValue && hasAnyInvestedValueHistory(points)
   const chartValues = hasInvestedValue
     ? points.flatMap((point) => point.invested_value === null ? [point.total_value] : [point.total_value, point.invested_value])
     : points.map((point) => point.total_value)
+  chartValues.push(...buyMarkers.map((buy) => buy.price))
   const minimum = Math.min(...chartValues)
   const maximum = Math.max(...chartValues)
   const rawRange = maximum - minimum
@@ -1430,12 +1596,15 @@ const ValueHistoryChart = ({ chartLabel, language, points, primaryLabel, seconda
   const lowerBound = Math.max(0, minimum - padding)
   const upperBound = maximum + padding
   const range = upperBound - lowerBound || 1
+  const timeX = (timestamp: number) => timed ? 100 * (timestamp - firstTime) / (lastTime - firstTime) : 50
+  const priceY = (price: number) => 92 - ((price - lowerBound) / range) * 84
   const coordinates = points.map((point, index) => ({
-    x: points.length === 1 ? 50 : (index / (points.length - 1)) * 100,
-    y: 92 - ((point.total_value - lowerBound) / range) * 84,
+    x: timed ? timeX(point.snapshot_at) : (index / (points.length - 1)) * 100,
+    y: priceY(point.total_value),
   }))
-  const selected = points[clamp(selectedIndex, 0, points.length - 1)]!
-  const selectedCoordinate = coordinates[clamp(selectedIndex, 0, coordinates.length - 1)]!
+  const activeIndex = clamp(selectedIndex, 0, points.length - 1)
+  const selected = points[activeIndex]!
+  const selectedCoordinate = coordinates[activeIndex]!
   const money = currency(language)
   const dates = dateTime(language)
   const line = coordinates.map(({ x, y }) => `${x},${y}`).join(' ')
@@ -1447,100 +1616,218 @@ const ValueHistoryChart = ({ chartLabel, language, points, primaryLabel, seconda
         previousInvestedValueExists = false
         return
       }
-      const x = points.length === 1 ? 50 : (index / (points.length - 1)) * 100
-      const y = 92 - ((point.invested_value - lowerBound) / range) * 84
+      const x = coordinates[index]!.x
+      const y = priceY(point.invested_value)
       investedValueLine += `${previousInvestedValueExists ? ' L' : ' M'} ${x} ${y}`
       previousInvestedValueExists = true
     })
   }
-  const area = `M ${coordinates[0]!.x} 100 L ${coordinates.map(({ x, y }) => `${x} ${y}`).join(' L ')} L ${coordinates.at(-1)!.x} 100 Z`
-
   const selectPoint = (clientX: number, target: SVGSVGElement) => {
+    if (!valuesVisible) return
     const bounds = target.getBoundingClientRect()
     const ratio = clamp((clientX - bounds.left) / bounds.width, 0, 1)
-    setSelectedIndex(Math.round(ratio * (points.length - 1)))
+    if (timed) {
+      const timestamp = firstTime + ratio * (lastTime - firstTime)
+      const index = points.findIndex((point) => point.snapshot_at >= timestamp)
+      if (index === -1) {
+        setSelectedIndex(points.length - 1)
+        return
+      }
+      const next = points[index]
+      const previous = points[index - 1]
+      setSelectedIndex(previous && next && timestamp - previous.snapshot_at < next.snapshot_at - timestamp ? index - 1 : Math.max(index, 0))
+    } else {
+      setSelectedIndex(Math.round(ratio * (points.length - 1)))
+    }
   }
 
   return (
-    <div className={`history-visual${valuesVisible ? '' : ' value-concealed'}`}>
-      <svg
-        aria-label={chartLabel ?? (language === 'th' ? 'กราฟมูลค่าพอร์ตย้อนหลัง เลื่อนหรือแตะเพื่อดูข้อมูลแต่ละจุด' : 'Portfolio value history. Hover or tap to inspect each point.')}
-        className="history-chart"
-        onPointerDown={(event) => selectPoint(event.clientX, event.currentTarget)}
-        onPointerMove={(event) => selectPoint(event.clientX, event.currentTarget)}
-        preserveAspectRatio="none"
-        role="img"
-        viewBox="0 0 100 100"
-      >
-        <defs>
-          <linearGradient id="portfolio-history-fill" x1="0" x2="0" y1="0" y2="1">
-            <stop offset="0%" stopColor="var(--accent)" stopOpacity="0.26" />
-            <stop offset="100%" stopColor="var(--accent)" stopOpacity="0" />
-          </linearGradient>
-        </defs>
-        <line className="history-grid-line" x1="0" x2="100" y1="8" y2="8" />
-        <line className="history-grid-line" x1="0" x2="100" y1="50" y2="50" />
-        <line className="history-grid-line" x1="0" x2="100" y1="92" y2="92" />
-        <path className="history-area" d={area} />
-        <polyline className="history-line" fill="none" points={line} vectorEffect="non-scaling-stroke" />
-        {hasInvestedValue ? <path className="history-invested-value-line" d={investedValueLine} fill="none" vectorEffect="non-scaling-stroke" /> : null}
-        <line className="history-selected-line" x1={selectedCoordinate.x} x2={selectedCoordinate.x} y1="8" y2="92" vectorEffect="non-scaling-stroke" />
-      </svg>
-      <div aria-live="polite" className="history-tooltip">
-        <span className="history-tooltip-value"><i className="history-legend-swatch portfolio-value" />{primaryLabel ?? (language === 'th' ? 'มูลค่าพอร์ต' : 'Portfolio value')} <strong>{money.format(selected.total_value)}</strong></span>
-        {hasInvestedValue && selected.invested_value !== null ? <span className="history-tooltip-value"><i className="history-legend-swatch invested-value" />{secondaryLabel ?? (language === 'th' ? 'ต้นทุนสินทรัพย์ที่เลือก' : 'Selected asset cost basis')} <strong>{money.format(selected.invested_value)}</strong></span> : null}
-        <span>{dates.format(selected.snapshot_at)}</span>
+    <div className={`history-visual${compact ? ' history-visual-compact' : ''}${valuesVisible ? '' : ' value-concealed'}`}>
+      <div className="history-chart-plot" data-chart-visible={plotVisible ? true : undefined} data-snapshot-selected={compact && activeIndex < points.length - 1 ? true : undefined} ref={plotRef}>
+        <svg
+          aria-label={chartLabel ?? (language === 'th' ? 'กราฟมูลค่าพอร์ตย้อนหลัง เลื่อนหรือแตะเพื่อดูข้อมูลแต่ละจุด' : 'Portfolio value history. Hover or tap to inspect each point.')}
+          className="history-chart"
+          onKeyDown={(event) => {
+            if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
+            event.preventDefault()
+            setSelectedBuyId(null)
+            setSelectedIndex((index) => {
+              if (event.key === 'Home') return 0
+              if (event.key === 'End') return points.length - 1
+              return clamp(index + (event.key === 'ArrowLeft' ? -1 : 1), 0, points.length - 1)
+            })
+          }}
+          onPointerDown={(event) => {
+            if (!valuesVisible) return
+            setSelectedBuyId(null)
+            setPulseRevision((revision) => revision + 1)
+            selectPoint(event.clientX, event.currentTarget)
+          }}
+          onPointerMove={(event) => {
+            if (selectedBuyId !== null) setSelectedBuyId(null)
+            selectPoint(event.clientX, event.currentTarget)
+          }}
+          preserveAspectRatio="none"
+          role="img"
+          tabIndex={valuesVisible ? 0 : -1}
+          viewBox="0 0 100 100"
+        >
+          {compact ? <>
+            <defs>
+              <linearGradient id={fillId} x1="0%" x2="0%" y1="0%" y2="100%">
+                <stop offset="0%" stopColor="var(--accent)" stopOpacity="0.17" />
+                <stop offset="100%" stopColor="var(--accent)" stopOpacity="0" />
+              </linearGradient>
+            </defs>
+            <polygon className="history-chart-fill" fill={`url(#${fillId})`} points={`0,100 ${line} 100,100`} />
+          </> : <>
+            <line className="history-grid-line" x1="0" x2="100" y1="8" y2="8" />
+            <line className="history-grid-line" x1="0" x2="100" y1="50" y2="50" />
+            <line className="history-grid-line" x1="0" x2="100" y1="92" y2="92" />
+          </>}
+          <polyline className="history-line" fill="none" points={line} vectorEffect="non-scaling-stroke" />
+          {hasInvestedValue ? <path className="history-invested-value-line" d={investedValueLine} fill="none" vectorEffect="non-scaling-stroke" /> : null}
+          {selectedBuy ? null : <line className="history-selected-line" x1={selectedCoordinate.x} x2={selectedCoordinate.x} y1="8" y2="92" vectorEffect="non-scaling-stroke" />}
+        </svg>
+        {valuesVisible && !selectedBuy ? <span aria-hidden="true" className="chart-point" key={`${activeIndex}:${selected.snapshot_at}:${pulseRevision}`} style={{ left: `${selectedCoordinate.x}%`, top: `${selectedCoordinate.y}%` }} /> : null}
+        {valuesVisible ? buyMarkers.map((buy) => {
+          const label = `${buy.reason ?? (language === 'th' ? 'ซื้อผ่านบอท' : 'Bot buy')} · ${dates.format(buy.executedAt)} · ${money.format(buy.price)}`
+          return <button
+            aria-label={label}
+            aria-pressed={buy.id === selectedBuyId}
+            className="dca-chart-marker"
+            data-pulsing={buy.id === pulsingBuy?.id ? true : undefined}
+            key={buy.id}
+            onClick={() => setSelectedBuyId((id) => id === buy.id ? null : buy.id)}
+            style={{ left: `${timeX(buy.executedAt)}%`, top: `${priceY(buy.price)}%` }}
+            title={label}
+            type="button"
+          />
+        }) : null}
+      </div>
+      <div aria-live={valuesVisible ? 'polite' : 'off'} className="history-tooltip">
+        {selectedBuy ? <>
+          <span className="history-tooltip-value"><i className="history-legend-swatch dca-buy-swatch" />{selectedBuy.reason ?? (language === 'th' ? 'ซื้อผ่านบอท' : 'Bot buy')} <strong>{money.format(selectedBuy.price)}</strong></span>
+          <span>{dates.format(selectedBuy.executedAt)}</span>
+        </> : <>
+          <span className="history-tooltip-value">{compact ? (language === 'th' ? 'ย้อนหลัง' : 'Snapshot') : <><i className="history-legend-swatch portfolio-value" />{primaryLabel ?? (language === 'th' ? 'มูลค่าพอร์ต' : 'Portfolio value')}</>} <strong>{money.format(selected.total_value)}</strong></span>
+          {hasInvestedValue && selected.invested_value !== null ? <span className="history-tooltip-value"><i className="history-legend-swatch invested-value" />{secondaryLabel ?? (language === 'th' ? 'ต้นทุนสินทรัพย์ที่เลือก' : 'Selected asset cost basis')} <strong>{money.format(selected.invested_value)}</strong></span> : null}
+          <span>{dates.format(selected.snapshot_at)}</span>
+        </>}
       </div>
     </div>
   )
 }
 
+const PortfolioValueCard = ({ history, language, onOpenHistory, totalValue, updatedAt, valuesVisible }: {
+  history: ValueHistoryPoint[]
+  language: Language
+  onOpenHistory: () => void
+  totalValue: number
+  updatedAt: number | null | undefined
+  valuesVisible: boolean
+}) => {
+  const [days, setDays] = useState(7)
+  const th = language === 'th'
+  const last = history.at(-1)
+  const points = useMemo(() => last ? history.filter((point) => point.snapshot_at >= last.snapshot_at - days * dayMs) : [], [days, history, last])
+  const first = points[0]
+  const change = last && first && points.length > 1 ? last.total_value - first.total_value : null
+  const returnPercent = change !== null && first && first.total_value > 0 ? 100 * change / first.total_value : null
+  const updateTime = updatedAt ? new Date(updatedAt) : null
+  const updateLabel = updateTime && new Intl.DateTimeFormat(th ? 'th-TH' : 'en-GB', {
+    ...(updateTime.toDateString() === new Date().toDateString() ? {} : { dateStyle: 'short' }),
+    timeStyle: 'short',
+  }).format(updateTime)
+
+  return (
+    <section className="hero-card" aria-labelledby="portfolio-value-title">
+      <div className="hero-card-top">
+        <h2 className="hero-eyebrow" id="portfolio-value-title">{th ? 'มูลค่าพอร์ตประเมินปัจจุบัน' : 'Estimated portfolio value'}</h2>
+        <button className="hero-history-link" onClick={onOpenHistory} type="button">{th ? 'ดูประวัติ' : 'View history'} <ChevronRightIcon width={14} height={14} /></button>
+      </div>
+      <p className={valuesVisible ? 'hero-amount' : 'hero-amount value-concealed'}>
+        <span className="portfolio-currency">฿</span>
+        <span>{formatPortfolioValue(language, totalValue)}</span>
+      </p>
+      <div className="hero-trend-header">
+        <div className="hero-meta">
+          {change === null && history.length > 1 ? (th ? 'ข้อมูลในช่วงนี้ยังไม่พอ' : 'Too few snapshots in this range') : null}
+          {change !== null ? <span className={`${change > 0 ? 'change-positive' : change < 0 ? 'change-negative' : ''}${valuesVisible ? '' : ' value-concealed'}`}>
+            <span className="sr-only">{th ? 'มูลค่าเปลี่ยนแปลง' : 'Value change'} </span>
+            {change > 0 ? '+' : ''}{currency(language).format(change)}
+            {returnPercent === null ? null : <span className="hero-change-percent"> {returnPercent > 0 ? '+' : ''}{returnPercent.toFixed(2)}%</span>}
+          </span> : null}
+          <span>{updateLabel ? `${th ? 'อัปเดต' : 'Updated'} ${updateLabel}` : (th ? 'รอข้อมูลจาก sync แรก' : 'Awaiting first sync')}</span>
+        </div>
+        {history.length > 1 ? <div aria-label={th ? 'ช่วงแนวโน้มมูลค่า' : 'Value trend range'} className="hero-ranges" role="group">
+          {[7, 30].map((range) => <button aria-pressed={days === range} key={range} onClick={() => setDays(range)} type="button">{th ? `${range} วัน` : `${range}D`}</button>)}
+        </div> : null}
+      </div>
+      {change !== null ? <ValueHistoryChart chartLabel={th ? 'แนวโน้มมูลค่าพอร์ต ใช้ลูกศรเพื่อดูมูลค่าย้อนหลัง' : 'Portfolio value trend. Use arrow keys to inspect snapshots.'} compact key={days} language={language} points={points} valuesVisible={valuesVisible} /> : null}
+    </section>
+  )
+}
+
 const AssetPriceTrend = ({ accountId, asset, averageCost, language, valuesVisible }: { accountId?: string | undefined; asset: string; averageCost: number | null; language: Language; valuesVisible: boolean }) => {
   const [range, setRange] = useState<PriceHistoryRange>('7d')
-  const [points, setPoints] = useState<PriceHistoryPoint[]>([])
-  const [isLoading, setIsLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
-  const verifiedAverageCost = averageCost !== null && Number.isFinite(averageCost) && averageCost > 0 ? averageCost : null
+  const [priceFeed, setPriceFeed] = useState<{ key: string; points: PriceHistoryPoint[]; unavailable: boolean }>()
+  const [botFeed, setBotFeed] = useState<{ key: string; activity: DcaActivity | null; unavailable: boolean }>()
+  const requestedHistory = useMemo(() => priceHistoryRequest(range), [range, asset, accountId])
+  const hasVerifiedAverageCost = averageCost !== null && Number.isFinite(averageCost) && averageCost > 0
+  const botFeedKey = JSON.stringify([asset, accountId, range, requestedHistory.from])
+  const priceFeedKey = JSON.stringify([botFeedKey, hasVerifiedAverageCost])
+  const currentPriceFeed = priceFeed?.key === priceFeedKey ? priceFeed : undefined
+  const points = currentPriceFeed?.points ?? []
+  const isLoading = !currentPriceFeed
+  const priceUnavailable = currentPriceFeed?.unavailable ?? false
+  const activity = botFeed?.key === botFeedKey ? botFeed.activity : null
+  const botUnavailable = botFeed?.key === botFeedKey && botFeed.unavailable
 
   useEffect(() => {
     let active = true
-    setIsLoading(true)
-    setError(null)
-
-    void loadAssetPriceHistory(asset, { ...priceHistoryRequest(range), accountId, averageCost: verifiedAverageCost !== null })
+    void loadAssetPriceHistory(asset, { ...requestedHistory, accountId, averageCost: hasVerifiedAverageCost })
       .then((nextPoints) => {
-        if (active) setPoints(nextPoints)
+        if (active) setPriceFeed({ key: priceFeedKey, points: nextPoints, unavailable: false })
       })
       .catch(() => {
-        if (active) setError(language === 'th' ? 'โหลดข้อมูลราคาไม่สำเร็จ' : 'Unable to load price data.')
+        if (active) setPriceFeed({ key: priceFeedKey, points: [], unavailable: true })
       })
-      .finally(() => {
-        if (active) setIsLoading(false)
-      })
+    return () => { active = false }
+  }, [accountId, asset, hasVerifiedAverageCost, priceFeedKey, requestedHistory])
 
-    return () => {
-      active = false
-    }
-  }, [accountId, asset, language, range, verifiedAverageCost])
+  useEffect(() => {
+    let active = true
+    void loadDcaActivity(asset, requestedHistory.from, accountId)
+      .then((activity) => {
+        if (active) setBotFeed({ key: botFeedKey, activity, unavailable: false })
+      })
+      .catch(() => {
+        if (active) setBotFeed({ key: botFeedKey, activity: null, unavailable: true })
+      })
+    return () => { active = false }
+  }, [accountId, asset, botFeedKey, requestedHistory])
 
   const valuePoints = points.map((point) => ({ invested_value: point.average_cost ?? null, selected_value: null, snapshot_at: point.snapshot_at, total_value: point.price }))
-  const hasHistoricalAverageCost = verifiedAverageCost !== null && valuePoints.filter((point) => point.invested_value !== null).length >= 2
+  const hasHistoricalAverageCost = hasVerifiedAverageCost && valuePoints.filter((point) => point.invested_value !== null).length >= 2
   const stats = valuePoints.length > 0 ? historyStats(valuePoints) : null
   const first = valuePoints[0]
   const latest = valuePoints.at(-1)
   const change = first && latest ? latest.total_value - first.total_value : null
   const percentage = change !== null && first && first.total_value !== 0 ? (change / first.total_value) * 100 : null
   const selectedRange = priceHistoryRanges.find((option) => option.id === range)!
-  const requestedFrom = priceHistoryStart(range)
+  const requestedFrom = requestedHistory.from || undefined
+  const plottedBuys = valuesVisible ? activity?.buys.filter((buy): buy is DcaBuy & { price: number } => buy.price !== null && buy.price > 0 && buy.executedAt >= requestedHistory.from) : undefined
+  const chartBounds = chartTimeBounds(valuePoints, plottedBuys)
+  const hasBuysBeforeSnapshots = first !== undefined && chartBounds.from < first.snapshot_at
   const historyIsShorterThanRange = first !== undefined && requestedFrom !== undefined && first.snapshot_at > requestedFrom + 60 * 60 * 1_000
 
   return (
     <section className="asset-price-trend" aria-label={language === 'th' ? `แนวโน้มราคา ${asset}` : `${asset} price trend`}>
       <div className="asset-price-heading">
         <div>
-          <p className="eyebrow">Price trend</p>
           <h2>{asset} / THB</h2>
-          <p>{language === 'th' ? 'ราคา ณ เวลา snapshot ที่บันทึกไว้ ไม่ใช่กำไรหรือขาดทุนของคุณ' : 'Recorded snapshot prices, not your profit or loss.'}</p>
+          <p>{language === 'th' ? 'ราคาจาก snapshot ของ Bitkub' : 'Recorded Bitkub snapshot prices'}</p>
         </div>
         <div className="range-tabs" aria-label={language === 'th' ? 'ช่วงเวลาราคา' : 'Price range'}>
           {priceHistoryRanges.map((option) => (
@@ -1561,19 +1848,37 @@ const AssetPriceTrend = ({ accountId, asset, averageCost, language, valuesVisibl
           <div className="history-legend" aria-label={language === 'th' ? 'คำอธิบายเส้นกราฟ' : 'Chart legend'}>
             <span><i className="history-legend-swatch portfolio-value" />{language === 'th' ? 'ราคา ณ snapshot' : 'Snapshot price'}</span>
             {hasHistoricalAverageCost ? <span><i className="history-legend-swatch invested-value" />{language === 'th' ? 'ต้นทุนเฉลี่ยย้อนหลัง' : 'Historical average cost'}</span> : null}
+            {plottedBuys?.length ? <span><i className="history-legend-swatch dca-buy-swatch" />{language === 'th' ? 'ราคาซื้อที่บอทรายงาน' : 'Bot-reported buy price'}</span> : null}
           </div>
-          <ValueHistoryChart chartLabel={language === 'th' ? `กราฟราคา ${asset} เทียบเงินบาท เลื่อนหรือแตะเพื่อดูข้อมูลแต่ละจุด` : `${asset} price in Thai baht. Hover or tap to inspect each point.`} language={language} points={valuePoints} primaryLabel={language === 'th' ? 'ราคา ณ snapshot' : 'Snapshot price'} secondaryLabel={language === 'th' ? 'ต้นทุนเฉลี่ยย้อนหลัง' : 'Historical average cost'} showInvestedValue={hasHistoricalAverageCost} valuesVisible={valuesVisible} />
+          <ValueHistoryChart buys={plottedBuys} chartLabel={language === 'th' ? `กราฟราคา ${asset} เทียบเงินบาท เลื่อนหรือแตะเพื่อดูข้อมูลแต่ละจุด` : `${asset} price in Thai baht. Hover or tap to inspect each point.`} language={language} points={valuePoints} primaryLabel={language === 'th' ? 'ราคา ณ snapshot' : 'Snapshot price'} secondaryLabel={language === 'th' ? 'ต้นทุนเฉลี่ยย้อนหลัง' : 'Historical average cost'} showInvestedValue={hasHistoricalAverageCost} valuesVisible={valuesVisible} />
           <div className="history-range">
-            <span>{dateTime(language).format(first.snapshot_at)}</span>
+            <span>{dateTime(language).format(chartBounds.from)}</span>
             <span>{selectedRange ? `${priceRangeLabel(selectedRange.id, language)} · ${valuePoints.length} ${language === 'th' ? 'จุดข้อมูล' : 'points'}` : null}</span>
-            <span>{dateTime(language).format(latest.snapshot_at)}</span>
+            <span>{dateTime(language).format(chartBounds.to)}</span>
           </div>
-          {historyIsShorterThanRange ? <p className="asset-price-availability">{language === 'th' ? `มีข้อมูลราคาตั้งแต่ ${dateTime(language).format(first.snapshot_at)} เท่านั้น` : `Price history is available from ${dateTime(language).format(first.snapshot_at)} only.`}</p> : null}
-          {verifiedAverageCost !== null && !hasHistoricalAverageCost ? <p className="asset-price-availability">{language === 'th' ? 'ต้นทุนเฉลี่ยย้อนหลังตรวจสอบไม่ครบสำหรับช่วงราคานี้ จึงไม่แสดงเส้นอ้างอิง' : 'Historical average cost is not verifiable for this entire price range, so no reference line is shown.'}</p> : null}
+          {hasBuysBeforeSnapshots || historyIsShorterThanRange ? (
+            <p className="asset-price-availability">
+              {language === 'th' ? `เริ่มบันทึกราคา ${dateTime(language).format(first.snapshot_at)}` : `Price snapshots start on ${dateTime(language).format(first.snapshot_at)}`}
+              {hasBuysBeforeSnapshots ? (language === 'th' ? ' · ก่อนหน้านั้นมีเฉพาะราคาซื้อที่บอทรายงาน' : ' · Earlier points are bot-reported buys') : null}
+            </p>
+          ) : null}
+          {hasVerifiedAverageCost && !hasHistoricalAverageCost ? <p className="asset-price-availability">{language === 'th' ? 'ต้นทุนเฉลี่ยย้อนหลังตรวจสอบไม่ครบสำหรับช่วงราคานี้ จึงไม่แสดงเส้นอ้างอิง' : 'Historical average cost is not verifiable for this entire price range, so no reference line is shown.'}</p> : null}
         </>
-      ) : !isLoading ? <p className="history-empty">{language === 'th' ? `ยังมีข้อมูลราคา ${asset} ไม่พอสำหรับแสดงกราฟในช่วงเวลานี้` : `There are not enough ${asset} price snapshots for this range.`}</p> : null}
-      {isLoading ? <p className="history-loading">{language === 'th' ? 'กำลังโหลดข้อมูลราคา' : 'Loading price data'}</p> : null}
-      {error ? <p className="history-error">{error}</p> : null}
+      ) : !isLoading && !priceUnavailable ? <p className="history-empty">{language === 'th' ? `ยังมีข้อมูลราคา ${asset} ไม่พอสำหรับแสดงกราฟในช่วงเวลานี้` : `There are not enough ${asset} price snapshots for this range.`}</p> : null}
+      {isLoading ? (
+        <div className="asset-price-loading" role="status">
+          <div aria-hidden="true" className="asset-price-metrics">
+            {[0, 1, 2, 3].map((tile) => <div key={tile}><span /><span /></div>)}
+          </div>
+          <div className="history-chart asset-price-placeholder">
+            <span>{language === 'th' ? 'กำลังโหลดข้อมูลราคา…' : 'Loading price history…'}</span>
+          </div>
+          <div aria-hidden="true" className="asset-price-loading-footer" />
+        </div>
+      ) : null}
+      {priceUnavailable ? <p className="history-error">{language === 'th' ? 'โหลดข้อมูลราคาไม่สำเร็จ' : 'Unable to load price data.'}</p> : null}
+      {activity && (activity.buys.length > 0 || activity.signal !== null) ? <DcaActivityPanel activity={activity} dates={dateTime(language)} language={language} money={currency(language)} quantity={quantity} valuesVisible={valuesVisible} /> : null}
+      {botUnavailable ? <p className="history-error">{language === 'th' ? 'โหลดข้อมูลบอท DCA ไม่สำเร็จ' : 'Unable to load DCA bot activity.'}</p> : null}
     </section>
   )
 }
@@ -1583,7 +1888,6 @@ const PortfolioHistory = ({ language, onOpenHistory, points, valuesVisible }: { 
   if (points.length < 2) {
     return (
       <section className="portfolio-history">
-        <p className="eyebrow">Snapshot history</p>
         <h2>{language === 'th' ? 'แนวโน้มมูลค่าพอร์ต' : 'Portfolio value trend'}</h2>
         <p className="history-empty">{language === 'th' ? 'กำลังสะสมข้อมูลราคา ณ เวลา snapshot เพื่อสร้างกราฟที่ถูกต้อง' : 'Collecting price snapshots to build an accurate chart.'}</p>
       </section>
@@ -1603,7 +1907,6 @@ const PortfolioHistory = ({ language, onOpenHistory, points, valuesVisible }: { 
     <section className="portfolio-history">
       <div className="section-heading">
         <div>
-          <p className="eyebrow">Snapshot history</p>
           <h2>{scope === 'pnl' ? (language === 'th' ? 'มูลค่าและต้นทุนสินทรัพย์ที่เลือก' : 'Selected asset value and cost') : (language === 'th' ? 'แนวโน้มมูลค่าพอร์ต' : 'Portfolio value trend')}</h2>
         </div>
         <div className="history-heading-actions">
@@ -1698,7 +2001,6 @@ const HistoryView = ({ accountId, initialPoints, investedAssets, language, onBac
     <section className="history-page" aria-label={language === 'th' ? 'กราฟมูลค่าพอร์ต' : 'Portfolio value chart'}>
       <div className="history-page-heading">
         <div>
-          <p className="eyebrow">Portfolio history</p>
           <h1>{language === 'th' ? 'กราฟมูลค่าพอร์ต' : 'Portfolio value chart'}</h1>
           <p>{hasInvestedValue ? (language === 'th' ? 'เทียบมูลค่าปัจจุบันกับต้นทุนเฉลี่ยของสินทรัพย์ที่เลือกใน P&L ณ เวลา snapshot' : 'Compare selected assets’ current value and average-cost basis at each snapshot.') : (language === 'th' ? 'มูลค่ารวมทุกสินทรัพย์ในพอร์ต ณ เวลา snapshot' : 'Total value of every portfolio asset at each snapshot.')}</p>
         </div>
@@ -1714,24 +2016,24 @@ const HistoryView = ({ accountId, initialPoints, investedAssets, language, onBac
           </div>
         </div>
       </div>
-      {hasSelectedPnl ? <div className="range-tabs" aria-label={language === 'th' ? 'ขอบเขตกราฟ' : 'Chart scope'}>
+      {hasSelectedPnl ? <div className="range-tabs history-scope-tabs" aria-label={language === 'th' ? 'ขอบเขตกราฟ' : 'Chart scope'}>
         <button aria-pressed={scope === 'portfolio'} className={scope === 'portfolio' ? 'range-tab active' : 'range-tab'} onClick={() => setScope('portfolio')} type="button">{language === 'th' ? 'พอร์ตรวม' : 'Whole portfolio'}</button>
         <button aria-pressed={scope === 'pnl'} className={scope === 'pnl' ? 'range-tab active' : 'range-tab'} onClick={() => setScope('pnl')} type="button">{language === 'th' ? 'P&L ที่เลือก' : 'Selected P&L'}</button>
       </div> : null}
 
       {range === 'custom' ? (
         <form className="custom-range" onSubmit={(event) => { event.preventDefault(); applyCustomRange() }}>
-          <label>{language === 'th' ? 'เริ่มต้น' : 'Start'}<input max={customEnd} onChange={(event) => setCustomStart(event.target.value)} type="date" value={customStart} /></label>
-          <label>{language === 'th' ? 'สิ้นสุด' : 'End'}<input min={customStart} onChange={(event) => setCustomEnd(event.target.value)} type="date" value={customEnd} /></label>
+          <label>{language === 'th' ? 'เริ่มต้น' : 'Start'}<Input max={customEnd} onChange={(event) => setCustomStart(event.target.value)} type="date" value={customStart} /></label>
+          <label>{language === 'th' ? 'สิ้นสุด' : 'End'}<Input min={customStart} onChange={(event) => setCustomEnd(event.target.value)} type="date" value={customEnd} /></label>
           <button className="export-button" type="submit">{language === 'th' ? 'แสดงกราฟ' : 'Show chart'}</button>
         </form>
       ) : null}
 
       {stats && latest && first ? (
         <>
-          <div className={`history-metrics${valuesVisible ? '' : ' value-concealed'}`}>
+          <div className={`history-metrics${hasInvestedValue ? '' : ' history-metrics-portfolio'}${valuesVisible ? '' : ' value-concealed'}`}>
             <div><span>{language === 'th' ? 'ล่าสุด' : 'Latest'}</span><strong>{currency(language).format(latest.total_value)}</strong></div>
-            <div><span>{language === 'th' ? 'ต้นทุนสินทรัพย์ที่เลือก' : 'Selected asset cost basis'}</span><strong>{hasInvestedValue ? currency(language).format(latest.invested_value!) : '—'}</strong></div>
+            {hasInvestedValue ? <div><span>{language === 'th' ? 'ต้นทุนสินทรัพย์ที่เลือก' : 'Selected asset cost basis'}</span><strong>{latest.invested_value === null ? '—' : currency(language).format(latest.invested_value)}</strong></div> : null}
             <div><span>{language === 'th' ? 'สูงสุด' : 'High'}</span><strong>{currency(language).format(stats.maximum)}</strong></div>
             <div><span>{language === 'th' ? 'ต่ำสุด' : 'Low'}</span><strong>{currency(language).format(stats.minimum)}</strong></div>
           </div>
@@ -1961,25 +2263,10 @@ const SettingsDialog = ({ accounts, archivedAccounts, ignoredPnlAssets, language
   theme: Theme
   valuesVisible: boolean
 }) => {
-  const dialogRef = useRef<HTMLDialogElement>(null)
-  const confirmationRef = useRef<HTMLDialogElement>(null)
+  const cancelArchiveRef = useRef<HTMLButtonElement>(null)
   const [accountMessage, setAccountMessage] = useState<string | null>(null)
   const [archivingAccountId, setArchivingAccountId] = useState<string | null>(null)
   const [pendingArchive, setPendingArchive] = useState<Account | null>(null)
-
-  useEffect(() => {
-    const dialog = dialogRef.current
-    if (!dialog) return
-    if (open && !dialog.open) dialog.showModal()
-    if (!open && dialog.open) dialog.close()
-  }, [open])
-
-  useEffect(() => {
-    const dialog = confirmationRef.current
-    if (!dialog) return
-    if (pendingArchive && !dialog.open) dialog.showModal()
-    if (!pendingArchive && dialog.open) dialog.close()
-  }, [pendingArchive])
 
   const archive = async (account: Account) => {
     setArchivingAccountId(account.id)
@@ -2009,36 +2296,51 @@ const SettingsDialog = ({ accounts, archivedAccounts, ignoredPnlAssets, language
   }
 
   return (
-    <dialog aria-labelledby="settings-title" className="settings-dialog" onCancel={(event) => { event.preventDefault(); dialogRef.current?.close() }} onClose={onClose} ref={dialogRef}>
-      <div className="settings-drawer">
-        <div className="settings-drawer-handle" aria-hidden="true" />
-        <div className="settings-heading">
-          <div><p className="eyebrow">Settings</p><h2 id="settings-title">{language === 'th' ? 'การตั้งค่า' : 'Settings'}</h2></div>
-          <button aria-label={language === 'th' ? 'ปิด' : 'Close'} className="portfolio-card-close" onClick={() => dialogRef.current?.close()} type="button">×</button>
-        </div>
-        <div className="settings-content">
-          <section className="settings-section">
-            <p>{language === 'th' ? 'ภาษา' : 'Language'}</p>
-            <div className="settings-options">
-              <button aria-pressed={language === 'th'} className={language === 'th' ? 'active' : undefined} onClick={() => setLanguage('th')} type="button">ไทย</button>
-              <button aria-pressed={language === 'en'} className={language === 'en' ? 'active' : undefined} onClick={() => setLanguage('en')} type="button">English</button>
+    <AppOverlay
+      closeLabel={language === 'th' ? 'ปิด' : 'Close'}
+      onClose={onClose}
+      open={open}
+      title={language === 'th' ? 'การตั้งค่า' : 'Settings'}
+    >
+      <div className="settings-content">
+          <div className="settings-card">
+            <div className="settings-row">
+              <div>
+                <p>{language === 'th' ? 'ภาษา' : 'Language'}</p>
+                <span>{language === 'th' ? 'เลือกภาษาของเมนูและคำอธิบาย' : 'Interface language'}</span>
+              </div>
+              <div className="settings-segmented" role="group" aria-label={language === 'th' ? 'ภาษา' : 'Language'}>
+                <button aria-pressed={language === 'th'} className={language === 'th' ? 'active' : undefined} onClick={() => setLanguage('th')} type="button">ไทย</button>
+                <button aria-pressed={language === 'en'} className={language === 'en' ? 'active' : undefined} onClick={() => setLanguage('en')} type="button">English</button>
+              </div>
             </div>
-          </section>
-          <section className="settings-section">
-            <p>{language === 'th' ? 'ธีม' : 'Theme'}</p>
-            <div className="settings-options">
-              <button aria-pressed={theme === 'dark'} className={theme === 'dark' ? 'active' : undefined} onClick={() => setTheme('dark')} type="button">{language === 'th' ? 'มืด' : 'Dark'}</button>
-              <button aria-pressed={theme === 'light'} className={theme === 'light' ? 'active' : undefined} onClick={() => setTheme('light')} type="button">{language === 'th' ? 'สว่าง' : 'Light'}</button>
+            <div className="settings-row">
+              <div>
+                <p>{language === 'th' ? 'ธีมสี' : 'Appearance'}</p>
+                <span>{language === 'th' ? 'โหมดสว่างหรือโหมดมืด' : 'Light or dark mode'}</span>
+              </div>
+              <div className="settings-segmented" role="group" aria-label={language === 'th' ? 'ธีม' : 'Theme'}>
+                <button aria-pressed={theme === 'light'} className={theme === 'light' ? 'active' : undefined} onClick={() => setTheme('light')} type="button"><SunIcon height={14} width={14} />{language === 'th' ? 'สว่าง' : 'Light'}</button>
+                <button aria-pressed={theme === 'dark'} className={theme === 'dark' ? 'active' : undefined} onClick={() => setTheme('dark')} type="button"><MoonIcon height={14} width={14} />{language === 'th' ? 'มืด' : 'Dark'}</button>
+              </div>
             </div>
-          </section>
-          <section className="settings-section settings-privacy">
-            <div><p>{language === 'th' ? 'ความเป็นส่วนตัว' : 'Privacy'}</p><span>{language === 'th' ? 'ซ่อนมูลค่าและจำนวนบนหน้าจอ' : 'Hide values and quantities on screen.'}</span></div>
-            <button aria-pressed={!valuesVisible} className={valuesVisible ? undefined : 'active'} onClick={() => setValuesVisible(!valuesVisible)} type="button">{valuesVisible ? (language === 'th' ? 'ซ่อนมูลค่า' : 'Hide values') : (language === 'th' ? 'แสดงมูลค่า' : 'Show values')}</button>
-          </section>
-          <section className="settings-section overview-section-settings">
-            <p>{language === 'th' ? 'ส่วนที่แสดงในภาพรวม' : 'Overview sections'}</p>
-            <span>{language === 'th' ? 'ซ่อนหรือแสดงส่วนต่าง ๆ ของหน้า Overview เฉพาะในเบราว์เซอร์นี้' : 'Show or hide Overview sections on this browser only.'}</span>
-            <div className="overview-section-options">
+            <div className="settings-row">
+              <div>
+                <p id="settings-hide-values-label">{language === 'th' ? 'ซ่อนมูลค่าและจำนวน' : 'Hide values & quantities'}</p>
+                <span>{language === 'th' ? 'เบลอตัวเลขทางการเงินทั้งหมดบนหน้าจอ' : 'Blur balances and financial figures on screen'}</span>
+              </div>
+              <Switch.Root aria-labelledby="settings-hide-values-label" checked={!valuesVisible} className="switch-control" onCheckedChange={(hidden) => setValuesVisible(!hidden)}>
+                <Switch.Thumb className="switch-thumb" />
+              </Switch.Root>
+            </div>
+          </div>
+
+          <section className="settings-card overview-section-settings">
+            <div className="settings-card-header">
+              <p>{language === 'th' ? 'ส่วนที่แสดงในภาพรวม' : 'Overview sections'}</p>
+              <span>{language === 'th' ? 'ซ่อนหรือแสดงการ์ดต่าง ๆ ในหน้าภาพรวมเฉพาะเบราว์เซอร์นี้' : 'Show or hide cards on Overview in this browser.'}</span>
+            </div>
+            <div className="overview-section-list">
               {([
                 ['pnl', language === 'th' ? 'กำไร / ขาดทุน Bitkub' : 'Bitkub profit and loss'],
                 ['history', language === 'th' ? 'แนวโน้มมูลค่าพอร์ต' : 'Portfolio value trend'],
@@ -2049,25 +2351,36 @@ const SettingsDialog = ({ accounts, archivedAccounts, ignoredPnlAssets, language
                 ['syncHealth', language === 'th' ? 'สถานะการเชื่อมต่อ' : 'Connection status'],
                 ['holdings', language === 'th' ? 'สินทรัพย์ในพอร์ต' : 'Portfolio holdings'],
               ] as Array<[OverviewSection, string]>).map(([section, label]) => (
-                <label key={section}><input checked={overviewSections[section]} onChange={(event) => setOverviewSection(section, event.target.checked)} type="checkbox" /><span>{label}</span></label>
+                <div className="settings-toggle-row" key={section}>
+                  <span>{label}</span>
+                  <Switch.Root aria-label={label} checked={overviewSections[section]} className="switch-control" onCheckedChange={(checked) => setOverviewSection(section, checked)}>
+                    <Switch.Thumb className="switch-thumb" />
+                  </Switch.Root>
+                </div>
               ))}
             </div>
           </section>
-          {pnlAssets.length > 0 ? <section className="settings-section pnl-preference-settings">
-            <p>{language === 'th' ? 'การคำนวณ P&L' : 'P&L calculation'}</p>
-            <span>{language === 'th' ? 'เลือกเหรียญที่จะรวมในตาราง ยอดสรุป และการ์ด P&L ของเบราว์เซอร์นี้ ข้อมูลดิบ ยอดคงเหลือ และ P&L ที่คำนวณได้จะไม่ถูกลบหรือแก้ไข' : 'Choose assets to include in P&L tables, summaries, and cards in this browser. Raw data, balances, and calculated P&L are never deleted or changed.'}</span>
+
+          {pnlAssets.length > 0 ? <section className="settings-card pnl-preference-settings">
+            <div className="settings-card-header">
+              <p>{language === 'th' ? 'เหรียญที่รวมในการคำนวณ P&L' : 'P&L asset inclusion'}</p>
+              <span>{language === 'th' ? 'เลือกเหรียญที่จะรวมในตาราง ยอดสรุป และการ์ด P&L ของเบราว์เซอร์นี้ โดยไม่ลบข้อมูลดิบ' : 'Choose assets included in P&L summaries in this browser without changing raw data.'}</span>
+            </div>
             <div className="pnl-preference-options">
               {pnlAssets.map((asset) => {
                 const included = !ignoredPnlAssets.includes(asset.asset)
                 return <button aria-pressed={included} className={included ? 'active' : undefined} key={asset.asset} onClick={() => setIgnoredPnlAssets(included ? [...ignoredPnlAssets, asset.asset].toSorted() : ignoredPnlAssets.filter((name) => name !== asset.asset))} type="button">
-                  <span>{asset.asset}</span><small>{included ? (language === 'th' ? 'รวมในการคำนวณ' : 'Included') : (language === 'th' ? 'ไม่รวม' : 'Excluded')}</small>
+                  <span>{asset.asset}</span><small>{included ? (language === 'th' ? 'รวม' : 'On') : (language === 'th' ? 'ซ่อน' : 'Off')}</small>
                 </button>
               })}
             </div>
           </section> : null}
-          <section className="settings-section account-settings">
-            <p>{language === 'th' ? 'บัญชีที่เชื่อมต่อ' : 'Connected accounts'}</p>
-            <span>{language === 'th' ? 'ตัดการเชื่อมต่อเพื่อหยุด sync และซ่อนจากพอร์ต ประวัติข้อมูลและ secret จะไม่ถูกลบ และเชื่อมต่อบัญชีเดิมกลับได้จากด้านล่าง' : 'Disconnecting stops sync and hides an account. This page does not delete history or credentials, and you can reconnect the same account below.'}</span>
+
+          <section className="settings-card account-settings">
+            <div className="settings-card-header">
+              <p>{language === 'th' ? 'บัญชีที่เชื่อมต่อ' : 'Connected accounts'}</p>
+              <span>{language === 'th' ? 'ตัดการเชื่อมต่อเพื่อหยุด sync และซ่อนจากพอร์ต ประวัติและ secret จะไม่ถูกลบ' : 'Disconnecting stops sync and hides an account without deleting history or credentials.'}</span>
+            </div>
             <div className="account-settings-list">
               {accounts.map((account) => (
                 <div className="account-settings-row" key={account.id}>
@@ -2090,28 +2403,49 @@ const SettingsDialog = ({ accounts, archivedAccounts, ignoredPnlAssets, language
             </div> : null}
             {accountMessage ? <p className="account-settings-message" role="status">{accountMessage}</p> : null}
           </section>
+
           <NotificationSettings language={language} />
+
+          <section className="settings-card settings-session">
+            <div>
+              <p>{language === 'th' ? 'เซสชัน' : 'Session'}</p>
+              <span>{language === 'th' ? 'ออกจากระบบ Cloudflare Access บนอุปกรณ์นี้' : 'Sign out of Cloudflare Access on this device.'}</span>
+            </div>
+            <a className="settings-logout-link" href="/cdn-cgi/access/logout">
+              <SignOutIcon width={15} height={15} />
+              <span>{language === 'th' ? 'ออกจากระบบ' : 'Sign out'}</span>
+            </a>
+          </section>
         </div>
-      </div>
-      <dialog aria-describedby="disconnect-account-description" aria-labelledby="disconnect-account-title" className="account-confirm-dialog" onCancel={(event) => { event.preventDefault(); event.stopPropagation(); setPendingArchive(null) }} onClose={(event) => { event.stopPropagation(); setPendingArchive(null) }} ref={confirmationRef}>
-        {pendingArchive ? <div className="account-confirm-content">
-          <p className="eyebrow">{language === 'th' ? 'ยืนยันการตัดการเชื่อมต่อ' : 'Confirm disconnect'}</p>
-          <h3 id="disconnect-account-title">{language === 'th' ? `ตัดการเชื่อมต่อ ${pendingArchive.label}?` : `Disconnect ${pendingArchive.label}?`}</h3>
-          <p id="disconnect-account-description">{language === 'th'
-            ? (accounts.length === 1 ? 'นี่คือบัญชีเดียวที่เชื่อมต่ออยู่ หน้า Portfolio จะว่างจนกว่าจะเชื่อมต่อบัญชีนี้กลับอีกครั้ง' : 'ระบบจะหยุด sync และซ่อนบัญชีนี้จากหน้า Portfolio')
-            : (accounts.length === 1 ? 'This is your only connected account. Your portfolio will be empty until you reconnect it.' : 'Sync will stop and this account will be hidden from the portfolio.')}</p>
-          <ul>
-            <li>{language === 'th' ? 'ประวัติและ snapshot ที่บันทึกไว้จะไม่ถูกลบ' : 'Recorded history and snapshots will not be deleted.'}</li>
-            <li>{language === 'th' ? 'API key ไม่ถูกเปิดเผย แก้ไข หรือลบจากหน้านี้' : 'This page does not expose, edit, or delete the API key.'}</li>
-            <li>{language === 'th' ? 'เชื่อมต่อบัญชีเดิมกลับได้จาก Settings' : 'You can reconnect the same account from Settings.'}</li>
-          </ul>
-          <div className="account-confirm-actions">
-            <button disabled={archivingAccountId !== null} onClick={() => setPendingArchive(null)} type="button">{language === 'th' ? 'ยกเลิก' : 'Cancel'}</button>
-            <button className="account-disconnect-button" disabled={archivingAccountId !== null} onClick={() => void archive(pendingArchive)} type="button">{archivingAccountId === pendingArchive.id ? (language === 'th' ? 'กำลังตัดการเชื่อมต่อ…' : 'Disconnecting…') : (language === 'th' ? 'ตัดการเชื่อมต่อ' : 'Disconnect')}</button>
-          </div>
-        </div> : null}
-      </dialog>
-    </dialog>
+      <AlertDialog.Root open={pendingArchive !== null} onOpenChange={(next, details) => {
+        if (next) return
+        if (archivingAccountId !== null) details.cancel()
+        else setPendingArchive(null)
+      }}>
+        <AlertDialog.Portal>
+          <AlertDialog.Backdrop className="app-overlay-backdrop account-confirm-layer" />
+          <AlertDialog.Viewport className="app-overlay-viewport account-confirm-layer">
+            <AlertDialog.Popup className="app-overlay-popup account-confirm-dialog" initialFocus={cancelArchiveRef}>
+              {pendingArchive ? <div className="account-confirm-content">
+                <AlertDialog.Title>{language === 'th' ? `ตัดการเชื่อมต่อ ${pendingArchive.label}?` : `Disconnect ${pendingArchive.label}?`}</AlertDialog.Title>
+                <AlertDialog.Description>{language === 'th'
+                  ? (accounts.length === 1 ? 'นี่คือบัญชีเดียวที่เชื่อมต่ออยู่ หน้า Portfolio จะว่างจนกว่าจะเชื่อมต่อบัญชีนี้กลับอีกครั้ง' : 'ระบบจะหยุด sync และซ่อนบัญชีนี้จากหน้า Portfolio')
+                  : (accounts.length === 1 ? 'This is your only connected account. Your portfolio will be empty until you reconnect it.' : 'Sync will stop and this account will be hidden from the portfolio.')}</AlertDialog.Description>
+                <ul>
+                  <li>{language === 'th' ? 'ประวัติและ snapshot ที่บันทึกไว้จะไม่ถูกลบ' : 'Recorded history and snapshots will not be deleted.'}</li>
+                  <li>{language === 'th' ? 'API key ไม่ถูกเปิดเผย แก้ไข หรือลบจากหน้านี้' : 'This page does not expose, edit, or delete the API key.'}</li>
+                  <li>{language === 'th' ? 'เชื่อมต่อบัญชีเดิมกลับได้จาก Settings' : 'You can reconnect the same account from Settings.'}</li>
+                </ul>
+                <div className="account-confirm-actions">
+                  <AlertDialog.Close disabled={archivingAccountId !== null} ref={cancelArchiveRef}>{language === 'th' ? 'ยกเลิก' : 'Cancel'}</AlertDialog.Close>
+                  <button className="account-disconnect-button" disabled={archivingAccountId !== null} onClick={() => void archive(pendingArchive)} type="button">{archivingAccountId === pendingArchive.id ? (language === 'th' ? 'กำลังตัดการเชื่อมต่อ…' : 'Disconnecting…') : (language === 'th' ? 'ตัดการเชื่อมต่อ' : 'Disconnect')}</button>
+                </div>
+              </div> : null}
+            </AlertDialog.Popup>
+          </AlertDialog.Viewport>
+        </AlertDialog.Portal>
+      </AlertDialog.Root>
+    </AppOverlay>
   )
 }
 
@@ -2128,7 +2462,6 @@ const SyncHealth = ({ language, onOpenHistory, statuses }: { language: Language;
     <section className="sync-health">
       <div className="section-heading">
         <div>
-          <p className="eyebrow">Sync health</p>
           <h2>{language === 'th' ? 'สถานะการเชื่อมต่อ' : 'Connection status'}</h2>
           <p className="sync-note">{language === 'th' ? 'Moondi อ่านข้อมูลจาก Bitkub เท่านั้น และไม่สามารถส่งคำสั่งซื้อ ขาย หรือถอนได้' : 'Moondi only reads data from Bitkub. It cannot place trades or withdrawals.'}</p>
           {attentionCount > 0 ? <p className="sync-alert" role="status">{language === 'th' ? `${attentionCount} แหล่งข้อมูลต้องตรวจสอบหรืออาจล่าช้า` : `${attentionCount} data source${attentionCount === 1 ? '' : 's'} needs attention or may be stale`}</p> : null}
@@ -2188,7 +2521,6 @@ const SyncActivity = ({ accountId, language, onBack }: { accountId?: string | un
       <button className="back-link" onClick={onBack} type="button">← {language === 'th' ? 'กลับไปภาพรวม' : 'Back to overview'}</button>
       <div className="sync-activity-heading">
         <div>
-          <p className="eyebrow">Sync activity</p>
           <h1>{language === 'th' ? 'กิจกรรมการซิงก์' : 'Sync activity'}</h1>
           <p>{language === 'th' ? 'แสดง 100 เหตุการณ์ล่าสุดที่บันทึกไว้ ไม่ได้เรียก Bitkub เพิ่ม' : 'Shows the latest 100 stored events. It does not make another Bitkub request.'}</p>
         </div>
@@ -2285,7 +2617,6 @@ const Transactions = ({ language, nextCursor, onLoadMore, transactions, valuesVi
     <section className="transactions">
       <div className="section-heading">
         <div>
-          <p className="eyebrow">Ledger</p>
           <h2>{language === 'th' ? 'รายการล่าสุด' : 'Recent activity'}</h2>
         </div>
         <div className="section-actions">
@@ -2296,17 +2627,19 @@ const Transactions = ({ language, nextCursor, onLoadMore, transactions, valuesVi
       <div className="transaction-controls">
         <label className="holding-search">
           <span className="sr-only">{language === 'th' ? 'ค้นหารายการตามสินทรัพย์' : 'Search activity by asset'}</span>
-          <input onChange={(event) => setQuery(event.target.value)} placeholder={language === 'th' ? 'ค้นหาสินทรัพย์' : 'Search assets'} type="search" value={query} />
+          <Input onChange={(event) => setQuery(event.target.value)} placeholder={language === 'th' ? 'ค้นหาสินทรัพย์' : 'Search assets'} type="search" value={query} />
         </label>
-        <label className="sort-control">
-          <span>{language === 'th' ? 'ประเภท' : 'Type'}</span>
-          <select onChange={(event) => setFilter(event.target.value as TransactionFilter)} value={filter}>
-            <option value="all">{language === 'th' ? 'ทั้งหมด' : 'All'}</option>
-            <option value="trade">{language === 'th' ? 'ซื้อ / ขาย' : 'Buy / sell'}</option>
-            <option value="crypto_transfer">{language === 'th' ? 'โอนคริปโต' : 'Crypto transfers'}</option>
-            <option value="fiat_transfer">{language === 'th' ? 'ฝาก / ถอนเงินบาท' : 'THB deposits / withdrawals'}</option>
-          </select>
-        </label>
+        <AppSelect<TransactionFilter>
+          items={[
+            { value: 'all', label: language === 'th' ? 'ทุกประเภท' : 'All types' },
+            { value: 'trade', label: language === 'th' ? 'ซื้อ / ขาย' : 'Buy / sell' },
+            { value: 'crypto_transfer', label: language === 'th' ? 'โอนคริปโต' : 'Crypto transfers' },
+            { value: 'fiat_transfer', label: language === 'th' ? 'ฝาก / ถอนเงินบาท' : 'THB deposits / withdrawals' },
+          ]}
+          label={language === 'th' ? 'ประเภทของธุรกรรม' : 'Transaction type'}
+          onChange={setFilter}
+          value={filter}
+        />
       </div>
       {!hasTrades ? <p className="transaction-status">{language === 'th' ? 'ยังไม่พบประวัติซื้อ/ขายที่นำมาแสดงได้ — Bitkub อาจไม่คืน order history สำหรับ symbol ที่มีอยู่' : 'No trade history is available yet. Bitkub may not return order history for the available symbols.'}</p> : null}
       {filteredTransactions.length > 0 ? (
@@ -2334,15 +2667,15 @@ const Transactions = ({ language, nextCursor, onLoadMore, transactions, valuesVi
               </div>
             ))}
           </div>
-          <div className="mobile-ledger">
+          <ul className="mobile-ledger" role="list">
             {filteredTransactions.map((transaction) => (
-              <article className="mobile-transaction" key={`${transaction.category}-${transaction.id}`}>
+              <li className="mobile-transaction" key={`${transaction.category}-${transaction.id}`}>
                 <div className="mobile-transaction-meta">
                   <time>{dateTime(language).format(transaction.executed_at)}</time>
                   <span className={transactionBadgeClass(transaction)}>{transactionLabel(transaction, language)}</span>
                 </div>
                 <div className="mobile-transaction-main">
-                  <strong>{transaction.asset}</strong>
+                  <strong className="asset-symbol"><AssetIcon asset={transaction.asset} />{transaction.asset}</strong>
                   <span className={valuesVisible ? undefined : 'value-concealed'}><small>{language === 'th' ? 'จำนวน' : 'Amount'}</small>{quantity.format(transaction.amount)}</span>
                 </div>
                 {transaction.price !== null || transactionValue(transaction) ? <div className={`mobile-transaction-values${valuesVisible ? '' : ' value-concealed'}`}>
@@ -2352,9 +2685,9 @@ const Transactions = ({ language, nextCursor, onLoadMore, transactions, valuesVi
                     return value ? `${value.approximate ? '≈' : ''}${formatTransactionMoney(language, value.value, value.quoteAsset)}` : '—'
                   })()}</strong></span>
                 </div> : null}
-              </article>
+              </li>
             ))}
-          </div>
+          </ul>
           {nextCursor ? (
             <div className="load-more">
               <button className="export-button" disabled={isLoadingMore} onClick={() => void loadMore()} type="button">{isLoadingMore ? (language === 'th' ? 'กำลังโหลด…' : 'Loading…') : (language === 'th' ? 'โหลดรายการเพิ่ม' : 'Load more')}</button>
@@ -2371,8 +2704,9 @@ export const App = () => {
   const accessDenied = accessMessage === 'unauthorized'
   const signedOut = accessMessage === 'logged_out'
   const isPublicState = accessDenied || signedOut
-  const [view, setView] = useState<View>('overview')
-  const [selectedAsset, setSelectedAsset] = useState<string | null>(null)
+  const initialRoute = parseRoute(window.location.pathname)
+  const [view, setView] = useState<View>(initialRoute.view)
+  const [selectedAsset, setSelectedAsset] = useState<string | null>(initialRoute.selectedAsset)
   const [theme, setTheme] = useState<Theme>(resolveTheme)
   const [language, setLanguage] = useState<Language>(resolveLanguage)
   const [portfolio, setPortfolio] = useState<Portfolio | null>(null)
@@ -2384,6 +2718,8 @@ export const App = () => {
   const [accounts, setAccounts] = useState<Account[]>([])
   const [archivedAccounts, setArchivedAccounts] = useState<Account[]>([])
   const [selectedAccountId, setSelectedAccountId] = useState<string | undefined>()
+  const [loadedAccountId, setLoadedAccountId] = useState<string | undefined>()
+  const changingAccountScope = loadedAccountId !== selectedAccountId
   const [watchlist, setWatchlist] = useState<WatchlistAsset[]>([])
   const [priceAlerts, setPriceAlerts] = useState<PriceAlert[]>([])
   const [allocationTargets, setAllocationTargets] = useState<AllocationTarget[]>([])
@@ -2395,6 +2731,7 @@ export const App = () => {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
   const [isLoading, setIsLoading] = useState(() => !accessDenied && !signedOut)
   const [isPullRefreshing, setIsPullRefreshing] = useState(false)
+  const [pullRefreshFailed, setPullRefreshFailed] = useState(false)
   const [pullDistance, setPullDistance] = useState(0)
   const pullStartY = useRef<number | null>(null)
   const pullDistanceRef = useRef(0)
@@ -2424,6 +2761,7 @@ export const App = () => {
     setWatchlist(dashboard.watchlist)
     setPriceAlerts(dashboard.priceAlerts)
     setAllocationTargets(dashboard.targets)
+    setLoadedAccountId(accountId)
     dashboardLoadedAt.current = Date.now()
     setError(null)
     return true
@@ -2458,7 +2796,7 @@ export const App = () => {
   }, [accessDenied, language, reloadDashboard, signedOut])
 
   useEffect(() => {
-    if (!portfolio) return
+    if (!portfolio || changingAccountScope) return
     let active = true
     void loadValueHistory({ accountId: selectedAccountId, assets: investedAssets, days: 30 })
       .then((points) => {
@@ -2468,7 +2806,7 @@ export const App = () => {
     return () => {
       active = false
     }
-  }, [investedAssets, portfolio, selectedAccountId])
+  }, [changingAccountScope, investedAssets, portfolio, selectedAccountId])
 
   useEffect(() => {
     if (accessDenied || signedOut) return
@@ -2569,11 +2907,12 @@ export const App = () => {
 
   const disconnectAccount = async (account: Account) => {
     await archiveAccount(account.id)
-    setSelectedAsset(null)
+    if (selectedAsset) navigateTo('overview')
     setSelectedAccountId(undefined)
+    setError(null)
     setAccounts((current) => current.filter((item) => item.id !== account.id))
     setArchivedAccounts((current) => [account, ...current.filter((item) => item.id !== account.id)])
-    await loadDashboardScope(undefined)
+    if (selectedAccountId === undefined) await loadDashboardScope(undefined)
   }
 
   const reconnectAccount = async (account: Account) => {
@@ -2586,15 +2925,20 @@ export const App = () => {
   const refreshFromPull = async () => {
     if (isPullRefreshing) return
     setIsPullRefreshing(true)
+    setPullRefreshFailed(false)
     try {
       await reloadDashboard()
+    } catch {
+      setPullRefreshFailed(true)
     } finally {
       setIsPullRefreshing(false)
     }
   }
 
   const beginPullRefresh = (event: TouchEvent<HTMLElement>) => {
-    if (event.touches.length !== 1 || window.scrollY > 0 || isPullRefreshing || isSettingsOpen) return
+    if (event.touches.length !== 1 || window.scrollY > 0 || isPullRefreshing || isSettingsOpen || isPortfolioCardOpen) return
+    if (!(event.target instanceof Node) || !event.currentTarget.contains(event.target)) return
+    setPullRefreshFailed(false)
     pullStartY.current = event.touches[0]?.clientY ?? null
   }
 
@@ -2605,116 +2949,330 @@ export const App = () => {
     setPullDistance(distance)
   }
 
-  const finishPullRefresh = () => {
-    const shouldRefresh = pullDistanceRef.current >= 72
+  const resetPullRefresh = () => {
     pullStartY.current = null
     pullDistanceRef.current = 0
     setPullDistance(0)
+  }
+
+  const finishPullRefresh = () => {
+    const shouldRefresh = pullDistanceRef.current >= 72
+    resetPullRefresh()
     if (shouldRefresh) void refreshFromPull()
   }
 
+  useEffect(() => {
+    const onPopState = () => {
+      const next = parseRoute(window.location.pathname)
+      setView(next.view)
+      setSelectedAsset(next.selectedAsset)
+    }
+    window.addEventListener('popstate', onPopState)
+    return () => window.removeEventListener('popstate', onPopState)
+  }, [])
+
+  const syncAttentionCount = changingAccountScope ? 0 : syncStatus.filter((status) => status.status !== 'success' || isStaleSync(status)).length
+  const allocationSlices = overviewSections.allocation ? aggregatePortfolioAllocation(portfolio?.holdings ?? []) : []
+  const hasAllocationCard = allocationSlices.length > 0
+  const notificationItems: NotificationItem[] = changingAccountScope ? [] : [
+    ...transactions.slice(0, 20).map((item): NotificationItem => ({
+      id: `ledger:${item.category}:${item.id}`,
+      occurredAt: item.executed_at,
+      target: 'transactions',
+      title: `${transactionLabel(item, language)} ${item.category === 'fiat_transfer' ? '' : item.asset}`.trim(),
+      detail: language === 'th' ? 'รายการจาก Bitkub' : 'Bitkub activity',
+    })),
+    ...syncStatus.flatMap((item): NotificationItem[] => item.occurred_at !== null && (item.status === 'failure' || item.status === 'deferred') ? [{
+      id: `sync:${item.account_id}:${item.data_type}:${item.occurred_at}`,
+      occurredAt: item.occurred_at,
+      target: 'sync',
+      title: language === 'th' ? 'ต้องตรวจสอบการซิงก์' : 'Sync needs attention',
+      detail: item.account_label,
+    }] : []),
+    ...priceAlerts.flatMap((item): NotificationItem[] => item.last_triggered_at === null ? [] : [{
+      id: `price:${item.id}:${item.last_triggered_at}`,
+      occurredAt: item.last_triggered_at,
+      target: 'overview',
+      title: language === 'th' ? `${item.asset} แตะราคาเป้าหมาย` : `${item.asset} reached its price target`,
+    }]),
+  ].toSorted((a, b) => b.occurredAt - a.occurredAt).slice(0, 20)
+  const navigateTo = (nextView: View, nextAsset: string | null = null) => {
+    setSelectedAsset(nextAsset)
+    setView(nextView)
+    const nextUrl = buildRouteUrl(nextView, nextAsset)
+    if (`${window.location.pathname}${window.location.search}` !== nextUrl) {
+      window.history.pushState(null, '', nextUrl)
+    }
+    window.scrollTo({ top: 0, behavior: 'instant' })
+  }
+  const onRouteClick = (nextView: View, nextAsset: string | null = null) => (event: MouseEvent<HTMLAnchorElement>) => {
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) return
+    event.preventDefault()
+    navigateTo(nextView, nextAsset)
+  }
+  const viewTitle = selectedAsset
+    ? selectedAsset
+    : view === 'overview'
+      ? (language === 'th' ? 'ภาพรวมพอร์ต' : 'Portfolio overview')
+      : view === 'transactions'
+        ? (language === 'th' ? 'รายการธุรกรรม' : 'Activity ledger')
+        : view === 'history'
+          ? (language === 'th' ? 'ประวัติมูลค่าพอร์ต' : 'Value history')
+          : (language === 'th' ? 'กิจกรรมการซิงก์' : 'Sync activity')
+
   if (isLoading) {
     return (
-      <main className="loading-shell" aria-busy="true" aria-live="polite">
-        <div className="loading-state">
-          <p className="wordmark">moondi<span>.</span></p>
-          <span className="loading-indicator" aria-hidden="true" />
-          <p>{language === 'th' ? 'กำลังตรวจสอบสิทธิ์และโหลดพอร์ต' : 'Checking access and loading your portfolio'}</p>
+      <main aria-label="Moondi" className="startup-shell">
+        <img alt="" className="startup-icon" height={84} src="/icon-512.png" width={84} />
+        <div className="startup-detail">
+          <p className="startup-status" role="status">{language === 'th' ? 'กำลังโหลดพอร์ต…' : 'Loading portfolio…'}</p>
+          <a className="startup-retry" href="">{language === 'th' ? 'โหลดใหม่' : 'Reload'}</a>
         </div>
       </main>
     )
   }
 
+  if (isPublicState) {
+    return (
+      <main className="public-shell">
+        <header className="public-header">
+          <a className="brand-lockup" href="/" aria-label="Moondi home">
+            <img alt="" className="brand-icon" height={32} src="/icon.svg" width={32} />
+            <span className="wordmark">moondi<span>.</span></span>
+          </a>
+        </header>
+        {accessDenied ? (
+          <section className="access-denied">
+            <p className="eyebrow">Access denied</p>
+            <h1>{language === 'th' ? 'บัญชีนี้ไม่มีสิทธิ์เข้าถึง Moondi' : 'This account is not allowed to access Moondi.'}</h1>
+            <p>{language === 'th' ? 'ออกจากระบบ Cloudflare Access แล้วลงชื่อเข้าใช้อีกครั้งด้วยบัญชีที่ได้รับอนุญาต' : 'Sign out of Cloudflare Access, then sign in again with an allowed account.'}</p>
+            <a className="access-link" href="/cdn-cgi/access/logout">{language === 'th' ? 'ออกจากระบบและเปลี่ยนบัญชี' : 'Sign out and change account'}</a>
+          </section>
+        ) : null}
+        {signedOut ? (
+          <section className="access-denied">
+            <p className="eyebrow">Signed out</p>
+            <h1>{language === 'th' ? 'ออกจากระบบแล้ว' : 'You are signed out.'}</h1>
+            <p>{language === 'th' ? 'ลงชื่อเข้าใช้ Google อีกครั้งเพื่อดูข้อมูลพอร์ต' : 'Sign in with Google again to view portfolio data.'}</p>
+            <button className="access-link access-button" onClick={restartAccess} type="button">{language === 'th' ? 'ลงชื่อเข้าใช้อีกครั้ง' : 'Sign in again'}</button>
+          </section>
+        ) : null}
+      </main>
+    )
+  }
+
   return (
-    <main className="shell" onTouchEnd={finishPullRefresh} onTouchMove={trackPullRefresh} onTouchStart={beginPullRefresh}>
-      <UpdateNotice language={language} />
-      <div aria-live="polite" className={isPullRefreshing || pullDistance > 0 ? 'pull-refresh-indicator is-visible' : 'pull-refresh-indicator'}>
-        <span>{isPullRefreshing ? (language === 'th' ? 'กำลังโหลดข้อมูลล่าสุด…' : 'Refreshing latest data…') : pullDistance >= 72 ? (language === 'th' ? 'ปล่อยเพื่อโหลดข้อมูลล่าสุด' : 'Release to refresh latest data') : (language === 'th' ? 'ดึงลงเพื่อโหลดข้อมูลล่าสุด' : 'Pull to refresh latest data')}</span>
-      </div>
-      <header className={isPublicState ? 'topbar public-topbar' : 'topbar'}>
-        <a className="wordmark" href="/" aria-label="Moondi home">moondi<span>.</span></a>
-        {!isPublicState ? <>
-          <nav aria-label="Main navigation">
-            <button className={view === 'overview' ? 'nav-item active' : 'nav-item'} onClick={() => { setSelectedAsset(null); setView('overview') }}>{language === 'th' ? 'ภาพรวม' : 'Overview'}</button>
-            <button className={view === 'transactions' ? 'nav-item active' : 'nav-item'} onClick={() => { setSelectedAsset(null); setView('transactions') }}>{language === 'th' ? 'รายการ' : 'Activity'}</button>
-          </nav>
-          <div className="header-actions">
-            <span className="sync-status">THB · {portfolio?.updatedAt ? `${language === 'th' ? 'อัปเดต' : 'Updated'} ${dateTime(language).format(portfolio.updatedAt)}` : (language === 'th' ? 'รอการ sync' : 'Awaiting sync')}</span>
-            <button aria-label={language === 'th' ? 'เปิดการตั้งค่า' : 'Open settings'} className="settings-toggle" onClick={() => setIsSettingsOpen(true)} type="button">⚙</button>
-            <a className="logout-link" href="/cdn-cgi/access/logout">{language === 'th' ? 'ออกจากระบบ' : 'Sign out'}</a>
+    <div className="app-layout">
+      <aside className="app-sidebar" aria-label={language === 'th' ? 'แถบนำทางด้านข้าง' : 'Sidebar navigation'}>
+        <div className="sidebar-brand">
+          <a className="brand-lockup" href={buildRouteUrl('overview')} onClick={onRouteClick('overview')} aria-label="Moondi home">
+            <img alt="" className="brand-icon" height={34} src="/icon.svg" width={34} />
+            <div className="brand-copy">
+              <span className="wordmark">moondi<span>.</span></span>
+              <span className="brand-subtitle">{language === 'th' ? 'Bitkub · อ่านอย่างเดียว' : 'Bitkub · Read-only'}</span>
+            </div>
+          </a>
+        </div>
+
+        <nav className="sidebar-nav" aria-label="Main navigation">
+          <p className="sidebar-group-label">{language === 'th' ? 'เมนูหลัก' : 'Workspace'}</p>
+          <a className={view === 'overview' && !selectedAsset ? 'sidebar-nav-item active' : 'sidebar-nav-item'} href={buildRouteUrl('overview')} onClick={onRouteClick('overview')}>
+            <OverviewIcon />
+            <span>{language === 'th' ? 'ภาพรวม' : 'Overview'}</span>
+          </a>
+          <a className={view === 'transactions' ? 'sidebar-nav-item active' : 'sidebar-nav-item'} href={buildRouteUrl('transactions')} onClick={onRouteClick('transactions')}>
+            <ActivityIcon />
+            <span>{language === 'th' ? 'รายการ' : 'Activity'}</span>
+          </a>
+          <a className={view === 'history' ? 'sidebar-nav-item active' : 'sidebar-nav-item'} href={buildRouteUrl('history')} onClick={onRouteClick('history')}>
+            <HistoryIcon />
+            <span>{language === 'th' ? 'ประวัติมูลค่า' : 'History'}</span>
+          </a>
+          <a className={view === 'sync' ? 'sidebar-nav-item active' : 'sidebar-nav-item'} href={buildRouteUrl('sync')} onClick={onRouteClick('sync')}>
+            <SyncIcon />
+            <span>{language === 'th' ? 'สถานะการซิงก์' : 'Sync activity'}</span>
+            {syncAttentionCount > 0 ? <span className="nav-badge" aria-label={language === 'th' ? `${syncAttentionCount} รายการต้องตรวจสอบ` : `${syncAttentionCount} need attention`}>{syncAttentionCount}</span> : null}
+          </a>
+        </nav>
+
+        <div className="sidebar-footer">
+          <div className="theme-segmented" role="group" aria-label={language === 'th' ? 'สลับธีม' : 'Theme switcher'}>
+            <button aria-pressed={theme === 'light'} className={theme === 'light' ? 'active' : undefined} onClick={() => setTheme('light')} type="button">
+              <SunIcon width={15} height={15} />
+              <span>{language === 'th' ? 'สว่าง' : 'Light'}</span>
+            </button>
+            <button aria-pressed={theme === 'dark'} className={theme === 'dark' ? 'active' : undefined} onClick={() => setTheme('dark')} type="button">
+              <MoonIcon width={15} height={15} />
+              <span>{language === 'th' ? 'มืด' : 'Dark'}</span>
+            </button>
           </div>
-        </> : null}
-      </header>
 
-      {accessDenied ? (
-        <section className="access-denied">
-          <p className="eyebrow">Access denied</p>
-          <h1>{language === 'th' ? 'บัญชีนี้ไม่มีสิทธิ์เข้าถึง Moondi' : 'This account is not allowed to access Moondi.'}</h1>
-          <p>{language === 'th' ? 'ออกจากระบบ Cloudflare Access แล้วลงชื่อเข้าใช้อีกครั้งด้วยบัญชีที่ได้รับอนุญาต' : 'Sign out of Cloudflare Access, then sign in again with an allowed account.'}</p>
-          <a className="access-link" href="/cdn-cgi/access/logout">{language === 'th' ? 'ออกจากระบบและเปลี่ยนบัญชี' : 'Sign out and change account'}</a>
-        </section>
-      ) : null}
+          <div className="sidebar-utility-row">
+            <button aria-label={language === 'th' ? 'เปลี่ยนภาษา' : 'Switch language'} className="sidebar-utility-btn" onClick={() => setLanguage(language === 'th' ? 'en' : 'th')} type="button">
+              <span>{language === 'th' ? 'TH / EN' : 'EN / TH'}</span>
+            </button>
+            <button aria-label={language === 'th' ? 'เปิดการตั้งค่า' : 'Open settings'} className="sidebar-utility-btn" onClick={() => setIsSettingsOpen(true)} type="button">
+              <SettingsIcon width={15} height={15} />
+              <span>{language === 'th' ? 'ตั้งค่า' : 'Settings'}</span>
+            </button>
+          </div>
 
-      {signedOut ? (
-        <section className="access-denied">
-          <p className="eyebrow">Signed out</p>
-          <h1>{language === 'th' ? 'ออกจากระบบแล้ว' : 'You are signed out.'}</h1>
-          <p>{language === 'th' ? 'ลงชื่อเข้าใช้ Google อีกครั้งเพื่อดูข้อมูลพอร์ต' : 'Sign in with Google again to view portfolio data.'}</p>
-          <button className="access-link access-button" onClick={restartAccess} type="button">{language === 'th' ? 'ลงชื่อเข้าใช้อีกครั้ง' : 'Sign in again'}</button>
-        </section>
-      ) : null}
-
-      {error && !accessDenied && !signedOut ? (
-        <section className="error-state">
-          <p className="eyebrow">Connection unavailable</p>
-          <h1>{needsApiAccess ? (language === 'th' ? 'ต้องยืนยันสิทธิ์ API' : 'API access needs confirmation') : (language === 'th' ? 'ยังติดต่อข้อมูลพอร์ตไม่ได้' : 'Portfolio data is unavailable')}</h1>
-          <p>{needsApiAccess ? (language === 'th' ? 'Cloudflare Access ของ API ยังไม่ได้ยืนยันในเบราว์เซอร์นี้' : 'Cloudflare Access for the API has not been confirmed in this browser.') : (language === 'th' ? 'ลองรีเฟรชหน้าอีกครั้ง หรือตรวจสอบการเชื่อมต่อ' : 'Try refreshing the page or check your connection.')}</p>
-          {needsApiAccess ? <a className="access-link" href={apiAccessUrl}>{language === 'th' ? 'ยืนยันสิทธิ์ API' : 'Confirm API access'}</a> : null}
-        </section>
-      ) : null}
-
-      {!error && !accessDenied && !signedOut && view === 'overview' ? (
-        selectedAsset && portfolio ? (
-          <AssetDetail accountId={selectedAccountId} asset={selectedAsset} holdings={portfolio.holdings} language={language} onClose={() => setSelectedAsset(null)} pnlAsset={portfolio.pnl.assets.find((item) => item.asset === selectedAsset)} portfolioValue={portfolio.totalValue} transactions={transactions} valuesVisible={valuesVisible} />
-        ) : <>
-          <section className="hero">
-            <div className="hero-heading">
-              <p className="eyebrow">Portfolio value</p>
-              <div className="hero-actions">
-                {accounts.length > 1 ? <label className="account-scope"><span>{language === 'th' ? 'ขอบเขต' : 'Scope'}</span><select onChange={(event) => { setSelectedAsset(null); setSelectedAccountId(event.target.value || undefined) }} value={selectedAccountId ?? ''}><option value="">{language === 'th' ? 'ทุกบัญชี' : 'All accounts'}</option>{accounts.map((account) => <option key={account.id} value={account.id}>{account.label}</option>)}</select></label> : null}
-                <button aria-label={valuesVisible ? (language === 'th' ? 'ซ่อนมูลค่าพอร์ต' : 'Hide portfolio values') : (language === 'th' ? 'แสดงมูลค่าพอร์ต' : 'Show portfolio values')} aria-pressed={!valuesVisible} className="value-toggle" onClick={() => setValuesVisible((visible) => !visible)} type="button">
-                  {valuesVisible ? `◉ ${language === 'th' ? 'ซ่อนมูลค่า' : 'Hide values'}` : `◌ ${language === 'th' ? 'แสดงมูลค่า' : 'Show values'}`}
-                </button>
+          <div className="sidebar-account-card">
+            <div className="sidebar-account-info">
+              <img alt="" className="sidebar-account-icon" height={30} src="/icon.svg" width={30} />
+              <div>
+                <strong>{accounts.length > 0 ? (language === 'th' ? `${accounts.length} บัญชี Bitkub` : `${accounts.length} Bitkub ${accounts.length === 1 ? 'account' : 'accounts'}`) : 'Bitkub'}</strong>
+                <span>{language === 'th' ? 'โหมดอ่านอย่างเดียว' : 'Read-only session'}</span>
               </div>
             </div>
-            <h1 className={valuesVisible ? undefined : 'value-concealed'}>
-              <span className="portfolio-currency">฿</span>
-              <span className="portfolio-number">{formatPortfolioValue(language, totalValue)}</span>
-            </h1>
-            <p className="hero-note">{language === 'th' ? 'มูลค่าประเมินปัจจุบันจาก balance snapshot ล่าสุด ไม่ใช่เงินต้นหรือกำไร' : 'Estimated current value from the latest balance snapshot. It is not principal or profit.'}</p>
-          </section>
-          <section className="freshness-banner" aria-live="polite">
-            <div><strong>{language === 'th' ? 'อัปเดตข้อมูลแบบอ่านอย่างเดียว' : 'Read-only data refresh'}</strong><span>{portfolio?.updatedAt ? (language === 'th' ? `ข้อมูลล่าสุด ${dateTime(language).format(portfolio.updatedAt)}` : `Latest data ${dateTime(language).format(portfolio.updatedAt)}`) : (language === 'th' ? 'กำลังรอข้อมูลจาก sync แรก' : 'Waiting for the first sync.')}</span></div>
-          </section>
-          {overviewSections.pnl && portfolio ? <PnlPanel ignoredAssets={ignoredPnlAssets} language={language} onSaveCostBasis={async (transferId, totalCostThb) => { await saveCryptoTransferCostBasis(transferId, totalCostThb); await reloadDashboard() }} pnl={portfolio.pnl} valuesVisible={valuesVisible} /> : null}
-          {overviewSections.history ? <PortfolioHistory language={language} onOpenHistory={() => setView('history')} points={history} valuesVisible={valuesVisible} /> : null}
-          {overviewSections.allocation ? <PortfolioAllocation holdings={portfolio?.holdings ?? []} language={language} valuesVisible={valuesVisible} /> : null}
-          {overviewSections.targets ? <AllocationTargets holdings={portfolio?.holdings ?? []} language={language} onRemove={async (asset) => { await removeAllocationTarget(asset); setAllocationTargets((current) => current.filter((target) => target.asset !== asset)) }} onSave={async (asset, targetPercent) => { const target = await saveAllocationTarget(asset, targetPercent); setAllocationTargets((current) => [...current.filter((item) => item.asset !== asset), target].toSorted((left, right) => left.asset.localeCompare(right.asset))) }} targets={allocationTargets} /> : null}
-          {overviewSections.rebalance ? <RebalanceAssistant holdings={portfolio?.holdings ?? []} language={language} targets={allocationTargets} valuesVisible={valuesVisible} /> : null}
-          {overviewSections.watchlist ? <TrackedPrices holdings={portfolio?.holdings ?? []} language={language} onAddAlert={async (asset, direction, targetPrice) => { const alert = await addPriceAlert(asset, direction, targetPrice); setPriceAlerts((current) => [alert, ...current]) }} onAddAsset={async (asset) => { const result = await addWatchlistAsset(asset); if (result.created) setWatchlist((current) => [{ asset: result.asset, created_at: Date.now(), price: null, updated_at: null }, ...current]); return result }} onRemoveAlert={async (id) => { await removePriceAlert(id); setPriceAlerts((current) => current.filter((alert) => alert.id !== id)) }} onRemoveAsset={async (asset) => { await removeWatchlistAsset(asset); setWatchlist((current) => current.filter((item) => item.asset !== asset)) }} priceAlerts={priceAlerts} watchlist={watchlist} /> : null}
-          {overviewSections.syncHealth ? <SyncHealth language={language} onOpenHistory={() => setView('sync')} statuses={syncStatus} /> : null}
-          {overviewSections.holdings && portfolio && portfolio.holdings.length > 0 ? (
-            <Holdings holdings={portfolio.holdings} language={language} onOpenPortfolioCard={() => setIsPortfolioCardOpen(true)} onSelectAsset={setSelectedAsset} onDownloadBackup={() => void downloadBackup()} priceHistories={priceHistories} valuesVisible={valuesVisible} />
-          ) : (overviewSections.holdings ? <EmptyState language={language} /> : null)}
-        </>
-      ) : null}
+            <a aria-label={language === 'th' ? 'ออกจากระบบ' : 'Sign out'} className="sidebar-logout-btn" href="/cdn-cgi/access/logout" title={language === 'th' ? 'ออกจากระบบ' : 'Sign out'}>
+              <SignOutIcon width={16} height={16} />
+            </a>
+          </div>
+        </div>
+      </aside>
 
-      {portfolio ? <PortfolioCardDialog holdings={portfolio.holdings} ignoredPnlAssets={ignoredPnlAssets} language={language} onClose={() => setIsPortfolioCardOpen(false)} open={isPortfolioCardOpen} pnl={portfolio.pnl} totalValue={portfolio.totalValue} /> : null}
-      <SettingsDialog accounts={accounts} archivedAccounts={archivedAccounts} ignoredPnlAssets={ignoredPnlAssets} language={language} onArchiveAccount={disconnectAccount} onClose={() => setIsSettingsOpen(false)} onRestoreAccount={reconnectAccount} open={isSettingsOpen} overviewSections={overviewSections} pnlAssets={portfolio?.pnl.assets ?? []} setIgnoredPnlAssets={setIgnoredPnlAssets} setLanguage={setLanguage} setOverviewSection={(section, visible) => setOverviewSections((current) => ({ ...current, [section]: visible }))} setTheme={setTheme} setValuesVisible={setValuesVisible} theme={theme} valuesVisible={valuesVisible} />
+      <main className="app-main" onTouchCancel={resetPullRefresh} onTouchEnd={finishPullRefresh} onTouchMove={trackPullRefresh} onTouchStart={beginPullRefresh}>
+        <header className="app-topbar">
+          <div className="topbar-left">
+            <a className="brand-lockup mobile-brand" href={buildRouteUrl('overview')} onClick={onRouteClick('overview')} aria-label="Moondi home">
+              <img alt="" className="brand-icon" height={28} src="/icon.svg" width={28} />
+              <span className="wordmark">moondi<span>.</span></span>
+            </a>
+            <div className="topbar-heading">
+              <h1>{viewTitle}</h1>
+            </div>
+          </div>
 
-      {!error && !accessDenied && !signedOut && view === 'transactions' ? <Transactions language={language} nextCursor={nextTransactionCursor} onLoadMore={loadMoreTransactions} transactions={transactions} valuesVisible={valuesVisible} /> : null}
-      {!error && !accessDenied && !signedOut && view === 'history' ? <HistoryView accountId={selectedAccountId} initialPoints={history} investedAssets={investedAssets} language={language} onBack={() => setView('overview')} valuesVisible={valuesVisible} /> : null}
-      {!error && !accessDenied && !signedOut && view === 'sync' ? <SyncActivity accountId={selectedAccountId} language={language} onBack={() => setView('overview')} /> : null}
-    </main>
+          <div className="topbar-actions">
+            {accounts.length > 1 ? (
+              <div className="account-scope">
+                <AppSelect
+                  items={[
+                    { value: '', label: language === 'th' ? 'ทุกบัญชี' : 'All accounts' },
+                    ...accounts.map(({ id, label }) => ({ value: id, label })),
+                  ]}
+                  label={language === 'th' ? 'ขอบเขตบัญชี' : 'Account scope'}
+                  onChange={(accountId) => {
+                    setError(null)
+                    setPullRefreshFailed(false)
+                    setSelectedAccountId(accountId || undefined)
+                    if (selectedAsset) navigateTo('overview')
+                  }}
+                  value={selectedAccountId ?? ''}
+                />
+              </div>
+            ) : null}
+
+            <NotificationCenter
+              dates={dateTime(language)}
+              items={notificationItems}
+              language={language}
+              onOpen={(target) => target === 'settings' ? setIsSettingsOpen(true) : navigateTo(target)}
+            />
+
+            <button
+              aria-label={valuesVisible ? (language === 'th' ? 'ซ่อนมูลค่าพอร์ต' : 'Hide portfolio values') : (language === 'th' ? 'แสดงมูลค่าพอร์ต' : 'Show portfolio values')}
+              aria-pressed={!valuesVisible}
+              className={valuesVisible ? 'topbar-pill-btn' : 'topbar-pill-btn is-active'}
+              onClick={() => setValuesVisible((visible) => !visible)}
+              type="button"
+            >
+              {valuesVisible ? <EyeIcon width={16} height={16} /> : <EyeOffIcon width={16} height={16} />}
+              <span className="topbar-pill-label">{valuesVisible ? (language === 'th' ? 'ซ่อนมูลค่า' : 'Hide values') : (language === 'th' ? 'แสดงมูลค่า' : 'Show values')}</span>
+            </button>
+
+            {portfolio && view === 'overview' && !selectedAsset ? (
+              <button className="topbar-pill-btn desktop-only-btn" onClick={() => setIsPortfolioCardOpen(true)} type="button">
+                <ImageCardIcon width={16} height={16} />
+                <span className="topbar-pill-label">{language === 'th' ? 'สร้างภาพพอร์ต' : 'Share card'}</span>
+              </button>
+            ) : null}
+
+            <button aria-label={language === 'th' ? 'เปิดการตั้งค่า' : 'Open settings'} className="topbar-icon-btn mobile-only-btn" onClick={() => setIsSettingsOpen(true)} type="button">
+              <SettingsIcon width={18} height={18} />
+            </button>
+          </div>
+        </header>
+        <UpdateNotice language={language} />
+        <div aria-live="polite" className={isPullRefreshing || pullRefreshFailed || pullDistance > 0 ? 'pull-refresh-indicator is-visible' : 'pull-refresh-indicator'}>
+          <span>{isPullRefreshing ? (language === 'th' ? 'กำลังโหลดข้อมูลล่าสุด…' : 'Refreshing latest data…') : pullRefreshFailed ? (language === 'th' ? 'รีเฟรชไม่สำเร็จ ลองดึงลงอีกครั้ง' : 'Refresh failed. Pull down to try again.') : pullDistance >= 72 ? (language === 'th' ? 'ปล่อยเพื่อโหลดข้อมูลล่าสุด' : 'Release to refresh latest data') : (language === 'th' ? 'ดึงลงเพื่อโหลดข้อมูลล่าสุด' : 'Pull to refresh latest data')}</span>
+        </div>
+
+        <div className="app-content">
+          {changingAccountScope && !error ? <p className="history-loading" role="status">{language === 'th' ? 'กำลังโหลดข้อมูลบัญชี…' : 'Loading account data…'}</p> : null}
+          {error ? (
+            <section className="error-state surface-card">
+              <h1>{needsApiAccess ? (language === 'th' ? 'ต้องยืนยันสิทธิ์ API' : 'API access needs confirmation') : (language === 'th' ? 'ยังติดต่อข้อมูลพอร์ตไม่ได้' : 'Portfolio data is unavailable')}</h1>
+              <p>{needsApiAccess ? (language === 'th' ? 'Cloudflare Access ของ API ยังไม่ได้ยืนยันในเบราว์เซอร์นี้' : 'Cloudflare Access for the API has not been confirmed in this browser.') : (language === 'th' ? 'ลองรีเฟรชหน้าอีกครั้ง หรือตรวจสอบการเชื่อมต่อ' : 'Try refreshing the page or check your connection.')}</p>
+              {needsApiAccess ? <a className="access-link" href={apiAccessUrl}>{language === 'th' ? 'ยืนยันสิทธิ์ API' : 'Confirm API access'}</a> : <a className="access-link" href="">{language === 'th' ? 'โหลดใหม่' : 'Reload'}</a>}
+            </section>
+          ) : null}
+
+          {!error && !changingAccountScope && view === 'overview' ? (
+            selectedAsset && portfolio ? (
+              <AssetDetail accountId={selectedAccountId} asset={selectedAsset} holdings={portfolio.holdings} language={language} onClose={() => navigateTo('overview')} pnlAsset={portfolio.pnl.assets.find((item) => item.asset === selectedAsset)} portfolioValue={portfolio.totalValue} transactions={transactions} valuesVisible={valuesVisible} />
+            ) : (
+              <div className="overview-stack">
+                <div className={hasAllocationCard ? 'overview-summary-grid has-allocation' : 'overview-summary-grid'}>
+                  <PortfolioValueCard history={history} language={language} onOpenHistory={() => navigateTo('history')} totalValue={totalValue} updatedAt={portfolio?.updatedAt} valuesVisible={valuesVisible} />
+
+                  {hasAllocationCard ? <PortfolioAllocation language={language} slices={allocationSlices} valuesVisible={valuesVisible} /> : null}
+                </div>
+
+                {overviewSections.pnl && portfolio ? <PnlPanel ignoredAssets={ignoredPnlAssets} language={language} onSaveCostBasis={async (transferId, totalCostThb) => { await saveCryptoTransferCostBasis(transferId, totalCostThb); await reloadDashboard() }} pnl={portfolio.pnl} valuesVisible={valuesVisible} /> : null}
+                {overviewSections.history ? <PortfolioHistory language={language} onOpenHistory={() => navigateTo('history')} points={history} valuesVisible={valuesVisible} /> : null}
+                {overviewSections.targets ? <AllocationTargets holdings={portfolio?.holdings ?? []} language={language} onRemove={async (asset) => { await removeAllocationTarget(asset); setAllocationTargets((current) => current.filter((target) => target.asset !== asset)) }} onSave={async (asset, targetPercent) => { const target = await saveAllocationTarget(asset, targetPercent); setAllocationTargets((current) => [...current.filter((item) => item.asset !== asset), target].toSorted((left, right) => left.asset.localeCompare(right.asset))) }} targets={allocationTargets} /> : null}
+                {overviewSections.rebalance ? <RebalanceAssistant holdings={portfolio?.holdings ?? []} language={language} targets={allocationTargets} valuesVisible={valuesVisible} /> : null}
+                {overviewSections.watchlist ? <TrackedPrices holdings={portfolio?.holdings ?? []} language={language} onAddAlert={async (asset, direction, targetPrice) => { const alert = await addPriceAlert(asset, direction, targetPrice); setPriceAlerts((current) => [alert, ...current]) }} onAddAsset={async (asset) => { const result = await addWatchlistAsset(asset); if (result.created) setWatchlist((current) => [{ asset: result.asset, created_at: Date.now(), price: null, updated_at: null }, ...current]); return result }} onRemoveAlert={async (id) => { await removePriceAlert(id); setPriceAlerts((current) => current.filter((alert) => alert.id !== id)) }} onRemoveAsset={async (asset) => { await removeWatchlistAsset(asset); setWatchlist((current) => current.filter((item) => item.asset !== asset)) }} priceAlerts={priceAlerts} valuesVisible={valuesVisible} watchlist={watchlist} /> : null}
+                {overviewSections.syncHealth ? <SyncHealth language={language} onOpenHistory={() => navigateTo('sync')} statuses={syncStatus} /> : null}
+                {overviewSections.holdings && portfolio && portfolio.holdings.length > 0 ? (
+                  <Holdings holdings={portfolio.holdings} language={language} onOpenPortfolioCard={() => setIsPortfolioCardOpen(true)} onSelectAsset={(asset) => navigateTo('overview', asset)} onDownloadBackup={() => void downloadBackup()} priceHistories={priceHistories} valuesVisible={valuesVisible} />
+                ) : (overviewSections.holdings ? <EmptyState language={language} /> : null)}
+
+                <footer className="overview-footer">
+                  <a className="overview-ledger-cta" href={buildRouteUrl('transactions')} onClick={onRouteClick('transactions')}>
+                    <ActivityIcon width={17} height={17} />
+                    <span>{language === 'th' ? 'ดูรายการธุรกรรมทั้งหมด' : 'View all transactions'}</span>
+                  </a>
+                  <p className="overview-readonly-note">
+                    {language === 'th' ? 'Moondi เชื่อมต่อ Bitkub แบบอ่านอย่างเดียว ไม่สามารถส่งคำสั่งซื้อ ขาย หรือถอนสินทรัพย์ได้' : 'Moondi uses read-only Bitkub access and cannot place trades or withdrawals.'}
+                  </p>
+                </footer>
+              </div>
+            )
+          ) : null}
+
+          {!error && !changingAccountScope && view === 'transactions' ? <Transactions language={language} nextCursor={nextTransactionCursor} onLoadMore={loadMoreTransactions} transactions={transactions} valuesVisible={valuesVisible} /> : null}
+          {!error && !changingAccountScope && view === 'history' ? <HistoryView accountId={selectedAccountId} initialPoints={history} investedAssets={investedAssets} language={language} onBack={() => navigateTo('overview')} valuesVisible={valuesVisible} /> : null}
+          {!error && !changingAccountScope && view === 'sync' ? <SyncActivity accountId={selectedAccountId} language={language} onBack={() => navigateTo('overview')} /> : null}
+        </div>
+      </main>
+
+      <nav className="mobile-tab-bar" data-view={view} aria-label={language === 'th' ? 'เมนูด้านล่าง' : 'Bottom navigation'}>
+        <a aria-current={view === 'overview' ? 'page' : undefined} className="mobile-tab" href={buildRouteUrl('overview')} onClick={onRouteClick('overview')}>
+          <span className="mobile-tab-pill"><OverviewIcon width={20} height={20} /></span>
+          <span>{language === 'th' ? 'ภาพรวม' : 'Overview'}</span>
+        </a>
+        <a aria-current={view === 'transactions' ? 'page' : undefined} className="mobile-tab" href={buildRouteUrl('transactions')} onClick={onRouteClick('transactions')}>
+          <span className="mobile-tab-pill"><ActivityIcon width={20} height={20} /></span>
+          <span>{language === 'th' ? 'รายการ' : 'Activity'}</span>
+        </a>
+        <a aria-current={view === 'history' ? 'page' : undefined} className="mobile-tab" href={buildRouteUrl('history')} onClick={onRouteClick('history')}>
+          <span className="mobile-tab-pill"><HistoryIcon width={20} height={20} /></span>
+          <span>{language === 'th' ? 'ประวัติ' : 'History'}</span>
+        </a>
+        <a aria-current={view === 'sync' ? 'page' : undefined} className="mobile-tab" href={buildRouteUrl('sync')} onClick={onRouteClick('sync')}>
+          <span className="mobile-tab-pill">
+            <SyncIcon width={20} height={20} />
+            {syncAttentionCount > 0 ? <span className="mobile-tab-dot" aria-hidden="true" /> : null}
+          </span>
+          <span>{language === 'th' ? 'การซิงก์' : 'Sync'}</span>
+        </a>
+      </nav>
+
+      {portfolio && !changingAccountScope ? <PortfolioCardDialog holdings={portfolio.holdings} ignoredPnlAssets={ignoredPnlAssets} language={language} onClose={() => setIsPortfolioCardOpen(false)} open={isPortfolioCardOpen} pnl={portfolio.pnl} totalValue={portfolio.totalValue} /> : null}
+      <SettingsDialog accounts={accounts} archivedAccounts={archivedAccounts} ignoredPnlAssets={ignoredPnlAssets} language={language} onArchiveAccount={disconnectAccount} onClose={() => setIsSettingsOpen(false)} onRestoreAccount={reconnectAccount} open={isSettingsOpen} overviewSections={overviewSections} pnlAssets={changingAccountScope ? [] : portfolio?.pnl.assets ?? []} setIgnoredPnlAssets={setIgnoredPnlAssets} setLanguage={setLanguage} setOverviewSection={(section, visible) => setOverviewSections((current) => ({ ...current, [section]: visible }))} setTheme={setTheme} setValuesVisible={setValuesVisible} theme={theme} valuesVisible={valuesVisible} />
+    </div>
   )
 }

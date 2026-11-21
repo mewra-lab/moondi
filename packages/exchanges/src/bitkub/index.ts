@@ -168,8 +168,6 @@ export const mapBitkubBalances = (balances: BitkubBalance[]): NormalizedBalance[
     reserved: asNumber(balance.reserved),
   }))
 
-// Bitkub credits a buy truncated to 8 decimals. Keeping the unrounded quotient overstates every
-// buy by up to 1e-8 and the drift accumulates against the wallet balance over many small buys.
 const baseUnitScale = 1e8
 
 const floorToBaseUnits = (value: number): number => Math.floor(value * baseUnitScale + 1e-6) / baseUnitScale

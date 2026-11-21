@@ -166,7 +166,6 @@ describe('calculateAverageCostPnl', () => {
       ({ amount, baseAsset: 'SOL', executedAt, fee: 0.85, feeAsset: 'THB', id, price, quoteAmount, quoteAsset: 'THB', side: 'buy' }) as const
     const pnl = calculateAverageCostPnl({
       cryptoTransfers: [],
-      // The wallet was credited exactly 0.137 for the first fill, while 339.65 THB / 2479.14 derives 0.13700315.
       holdings: [{ amount: 0.137 + 0.09125404, asset: 'SOL', price: 2480 }],
       overrides: [],
       trades: [buy('fill-1', 0.13700315, 2479.14, 339.65, 1), buy('fill-2', 0.09125404, 2479.89, 226.3, 1)],
@@ -178,7 +177,6 @@ describe('calculateAverageCostPnl', () => {
   it('still withholds P&L when the quantity gap is larger than the THB rounding of every buy', () => {
     const pnl = calculateAverageCostPnl({
       cryptoTransfers: [],
-      // 0.01 SOL at 2,480 THB is about 25 THB, far beyond the rounding of one 0.01 THB amount.
       holdings: [{ amount: 0.13700315 - 0.01, asset: 'SOL', price: 2480 }],
       overrides: [],
       trades: [{ amount: 0.13700315, baseAsset: 'SOL', executedAt: 1, fee: 0.85, feeAsset: 'THB', id: 'fill', price: 2479.14, quoteAmount: 339.65, quoteAsset: 'THB', side: 'buy' }],

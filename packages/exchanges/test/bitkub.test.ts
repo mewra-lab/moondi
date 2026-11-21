@@ -205,15 +205,15 @@ describe('Bitkub mapping', () => {
     const adapter = new BitkubAdapter({ apiKey: 'key', apiSecret: 'secret', fetcher })
 
     await expect(adapter.fetchTrades()).resolves.toEqual([])
-    const historyUrl = requests.find((request) => request.includes('/api/v3/market/my-order-history'))
-    if (!historyUrl) throw new Error('order-history request was not sent')
-    const query = new URL(historyUrl).searchParams
-    expect(query.get('lmt')).toBe('100')
-    expect(query.has('cursor')).toBe(false)
-    expect(query.get('pagination_type')).toBe('keyset')
-    expect(query.get('sym')).toBe('BTC_THB')
-    expect(requests.some((request) => request.includes('sym=BTC_USDT'))).toBe(true)
-    expect(requests.some((request) => request.includes('sym=OLD_THB'))).toBe(false)
+    const historyQueries = requests.map((request) => new URL(request))
+      .filter((url) => url.pathname === '/api/v3/market/my-order-history')
+      .map((url) => url.searchParams)
+    expect(historyQueries.map((query) => query.get('sym')).sort()).toEqual(['BTC_THB', 'BTC_USDT'])
+    for (const query of historyQueries) {
+      expect(query.get('lmt')).toBe('100')
+      expect(query.has('cursor')).toBe(false)
+      expect(query.get('pagination_type')).toBe('keyset')
+    }
   })
 
   it('follows the next keyset cursor exactly once', async () => {

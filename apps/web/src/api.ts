@@ -1,3 +1,5 @@
+import type { DcaActivity } from '@moondi/shared'
+
 export type Holding = {
   account_id: string
   account_exchange: string
@@ -83,6 +85,13 @@ export type PriceHistoryPoint = {
   price: number
 }
 
+export type AssetPriceHistoryOptions = {
+  accountId?: string | undefined
+  averageCost?: boolean
+  days?: number
+  from?: number
+}
+
 export type SyncStatus = {
   account_id: string
   account_label: string
@@ -153,6 +162,7 @@ const request = async <T>(path: string, init?: RequestInit): Promise<T> => {
   try {
     response = await fetch(`${baseUrl}${path}`, { ...init, credentials: 'include', headers: { Accept: 'application/json', ...init?.headers } })
   } catch {
+    if (init?.signal?.aborted) throw init.signal.reason
     throw new Error(apiAccessRequired)
   }
 
@@ -196,6 +206,11 @@ export const testPushDelivery = async (endpoint: string): Promise<void> => {
 
 const scopedQuery = (accountId?: string): string => accountId ? `&account=${encodeURIComponent(accountId)}` : ''
 
+export const loadDcaActivity = async (asset: string, from: number, accountId?: string): Promise<DcaActivity | null> => {
+  const { activity } = await request<{ activity: DcaActivity | null }>(`/api/dca/activity/${encodeURIComponent(asset)}?from=${from}${scopedQuery(accountId)}`)
+  return activity
+}
+
 export const loadAccounts = async (): Promise<Account[]> => (await request<{ accounts: Account[] }>('/api/accounts')).accounts
 
 export const loadArchivedAccounts = async (): Promise<Account[]> => (await request<{ accounts: Account[] }>('/api/accounts/archived')).accounts
@@ -218,24 +233,31 @@ export const saveCryptoTransferCostBasis = async (transferId: string, totalCostT
 
 export const loadDashboard = async (accountId?: string): Promise<Dashboard> => {
   const scope = scopedQuery(accountId)
-  const [portfolio, transactions, history, syncStatus, watchlist, priceAlerts, targets] = await Promise.all([
-    request<Portfolio>(`/api/portfolio?${scope.slice(1)}`),
-    request<{ nextCursor: string | null; transactions: Transaction[] }>(`/api/transactions?limit=100${scope}`),
-    request<{ points: ValueHistoryPoint[] }>(`/api/history/value?days=30${scope}`),
-    request<{ statuses: SyncStatus[] }>(`/api/sync-status?${scope.slice(1)}`),
-    request<{ assets: WatchlistAsset[] }>('/api/watchlist'),
-    request<{ alerts: PriceAlert[] }>('/api/price-alerts'),
-    request<{ targets: AllocationTarget[] }>('/api/allocation-targets'),
-  ])
-  return {
-    history: history.points,
-    nextTransactionCursor: transactions.nextCursor,
-    priceAlerts: priceAlerts.alerts,
-    portfolio,
-    syncStatus: syncStatus.statuses,
-    targets: targets.targets,
-    transactions: transactions.transactions,
-    watchlist: watchlist.assets,
+  const controller = new AbortController()
+  const timeout = window.setTimeout(() => controller.abort(), 15_000)
+  const options = { signal: controller.signal }
+  try {
+    const [portfolio, transactions, history, syncStatus, watchlist, priceAlerts, targets] = await Promise.all([
+      request<Portfolio>(`/api/portfolio?${scope.slice(1)}`, options),
+      request<{ nextCursor: string | null; transactions: Transaction[] }>(`/api/transactions?limit=100${scope}`, options),
+      request<{ points: ValueHistoryPoint[] }>(`/api/history/value?days=30${scope}`, options),
+      request<{ statuses: SyncStatus[] }>(`/api/sync-status?${scope.slice(1)}`, options),
+      request<{ assets: WatchlistAsset[] }>('/api/watchlist', options),
+      request<{ alerts: PriceAlert[] }>('/api/price-alerts', options),
+      request<{ targets: AllocationTarget[] }>('/api/allocation-targets', options),
+    ])
+    return {
+      history: history.points,
+      nextTransactionCursor: transactions.nextCursor,
+      priceAlerts: priceAlerts.alerts,
+      portfolio,
+      syncStatus: syncStatus.statuses,
+      targets: targets.targets,
+      transactions: transactions.transactions,
+      watchlist: watchlist.assets,
+    }
+  } finally {
+    window.clearTimeout(timeout)
   }
 }
 
@@ -251,10 +273,11 @@ export const loadValueHistory = async ({ accountId, assets, days, from, to }: { 
 }
 
 export const loadSyncEvents = async (limit = 100, accountId?: string): Promise<SyncEvent[]> => (
-  await request<{ events: SyncEvent[] }>(`/api/sync-events?limit=${Math.min(Math.max(Math.trunc(limit), 1), 100)}${scopedQuery(accountId)}`)
-).events
+  (await request<{ events: SyncEvent[] }>(`/api/sync-events?limit=${Math.min(Math.max(Math.trunc(limit), 1), 100)}${scopedQuery(accountId)}`)).events
+)
 
-export const loadAssetPriceHistory = async (asset: string, { accountId, averageCost, days, from }: { accountId?: string | undefined; averageCost?: boolean; days?: number; from?: number }): Promise<PriceHistoryPoint[]> => {
+export const loadAssetPriceHistory = async (asset: string, options: AssetPriceHistoryOptions): Promise<PriceHistoryPoint[]> => {
+  const { accountId, averageCost, days, from } = options
   const query = new URLSearchParams()
   if (accountId) query.set('account', accountId)
   if (averageCost) query.set('averageCost', '1')

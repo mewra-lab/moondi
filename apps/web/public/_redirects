@@ -1,1 +1,6 @@
 /login /index.html 200
+/activity /index.html 200
+/transactions /index.html 200
+/history /index.html 200
+/sync /index.html 200
+/asset/* /index.html 200

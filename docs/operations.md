@@ -69,6 +69,13 @@ Worker delivery is limited to once per device per minute and does not include
 portfolio data. A push accepted by the push service can still be hidden by the
 browser or operating-system notification settings.
 
+For AWS Bitkub activity pushes, deploy both the API and Sync Workers. Set the
+same `INTERNAL_PUSH_TEST_TOKEN` secret in both Workers and keep the API
+Worker's existing `SYNC` binding pointed at the Sync Worker. Enable the
+desired trade and transfer categories for the device. A newly inserted record
+from the past 24 hours can generate a push after sync. A record that was
+already synced or corrected only appears in Activity and the in-app panel.
+
 ## Backup and recovery
 
 Before schema changes or major upgrades:

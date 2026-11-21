@@ -13,8 +13,8 @@ export default defineConfig({
         name: 'Moondi Portfolio',
         short_name: 'Moondi',
         description: 'Private crypto portfolio tracking',
-        theme_color: '#0f1720',
-        background_color: '#f3f0e8',
+        theme_color: '#101114',
+        background_color: '#101114',
         display: 'standalone',
         start_url: '/',
         icons: [
@@ -33,6 +33,7 @@ export default defineConfig({
         ]
       },
       workbox: {
+        globIgnores: ['startup/**'],
         importScripts: ['push-handler.js'],
         navigateFallback: '/index.html',
         navigateFallbackDenylist: [/^\/cdn-cgi\//, /^\/login$/]

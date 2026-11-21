@@ -284,7 +284,7 @@ const sendPushNotification = async (
   }
 }
 
-const sendPush = async (env: Env, notificationType: PushNotificationType, payload: { body: string; tag: string; title: string }): Promise<void> => {
+const sendPush = async (env: Env, notificationType: PushNotificationType, payload: { body: string; tag: string; title: string; url?: string }): Promise<void> => {
   const publicKey = readOptionalSecret(env, 'VAPID_PUBLIC_KEY')
   const privateKey = readOptionalSecret(env, 'VAPID_PRIVATE_KEY')
   const subject = readOptionalSecret(env, 'VAPID_SUBJECT')
@@ -302,7 +302,7 @@ const sendPush = async (env: Env, notificationType: PushNotificationType, payloa
       endpoint: subscription.endpoint,
       status: await sendPushNotification(
         asWebPushSubscription(subscription),
-        { ...payload, url: '/' },
+        { url: '/', ...payload },
         pushOptions(publicKey, privateKey, subject, 60 * 60, 'normal'),
       ),
     })))
@@ -312,6 +312,32 @@ const sendPush = async (env: Env, notificationType: PushNotificationType, payloa
     if (failedPushCount > 0) console.warn(JSON.stringify({ failedPushCount, message: 'Push notification delivery failed' }))
   } catch (error) {
     console.warn(JSON.stringify({ error: readError(error), message: 'Push notification delivery failed' }))
+  }
+}
+
+const historyPushLabels = {
+  trades: { category: 'trades', incoming: 'ซื้อ', outgoing: 'ขาย', title: 'Moondi มีรายการซื้อขายใหม่' },
+  crypto_transfers: { category: 'cryptoTransfers', incoming: 'รับเข้า', outgoing: 'โอนออก', title: 'Moondi มีรายการโอนคริปโตใหม่' },
+  fiat_transfers: { category: 'fiatTransfers', incoming: 'ฝากเงิน', outgoing: 'ถอนเงิน', title: 'Moondi มีรายการฝากถอนเงินบาทใหม่' },
+} as const
+
+const parseHistoryPush = (body: unknown) => {
+  if (typeof body !== 'object' || body === null) return undefined
+  const dataType: unknown = Reflect.get(body, 'dataType')
+  if (dataType !== 'trades' && dataType !== 'crypto_transfers' && dataType !== 'fiat_transfers') return undefined
+  const incoming: unknown = Reflect.get(body, 'incoming')
+  const outgoing: unknown = Reflect.get(body, 'outgoing')
+  if (typeof incoming !== 'number' || typeof outgoing !== 'number' || !Number.isSafeInteger(incoming)
+    || !Number.isSafeInteger(outgoing) || incoming < 0 || outgoing < 0 || incoming + outgoing < 1 || incoming + outgoing > 250) return undefined
+  const label = historyPushLabels[dataType]
+  return {
+    category: label.category,
+    payload: {
+      body: [incoming > 0 ? `${label.incoming} ${incoming} รายการ` : '', outgoing > 0 ? `${label.outgoing} ${outgoing} รายการ` : ''].filter(Boolean).join(' · '),
+      tag: `moondi-history-${dataType}`,
+      title: label.title,
+      url: '/activity',
+    },
   }
 }
 
@@ -611,6 +637,13 @@ const startSync = async (env: Env, ctx: ExecutionContext): Promise<boolean> => {
 export default {
   async fetch(request, env, ctx): Promise<Response> {
     const url = new URL(request.url)
+    if (request.method === 'POST' && url.pathname === '/internal/push/activity') {
+      if (!await hasInternalAccess(request, env)) return Response.json({ error: 'Not found' }, { status: 404 })
+      const summary = parseHistoryPush(await request.json().catch(() => null))
+      if (!summary) return Response.json({ error: 'Invalid activity summary' }, { status: 400 })
+      await sendPush(env, summary.category, summary.payload)
+      return new Response(null, { status: 204 })
+    }
     if (request.method === 'POST' && url.pathname === '/internal/push/test') {
       if (!await hasInternalAccess(request, env)) return Response.json({ error: 'Not found' }, { status: 404 })
       const body: unknown = await request.json().catch(() => null)
