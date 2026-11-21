@@ -199,6 +199,19 @@ The API field `investedAmount` is this verified acquisition cost: remaining
 open cost plus cost allocated to units already sold. It is not THB deposits
 minus withdrawals; fiat transfers remain account cash-flow history only.
 
+**Cost method.** Average cost is the default. Settings in the P&L panel offer **By
+lot** as an optional per-browser view of the same ledger: each buy or deposit is
+its own lot, a sale takes the most recently bought lots first, and a withdrawal
+takes coins bought the same day (Thailand time) first and then the oldest lots.
+This is an assumption about which coins were sold or sent, not something the
+exchange records, so it can differ from your own records (for example coins
+bought on Monday and sent on Tuesday are treated as oldest-first). It is useful
+when you often buy and send coins to a wallet while an older position stays on
+Bitkub: average cost would remove the old position's cost with every send. The
+choice changes the P&L, the invested-value line, and the historical cost line
+together, and the P&L card says which method produced the number. It does not
+change any stored data.
+
 An incoming crypto transfer from outside Bitkub remains excluded until you set
 its **total THB cost basis**. Withdrawals carry cost out of Bitkub and do not
 create realized P&L. If a required cost basis, quote conversion, or balance
@@ -220,9 +233,13 @@ External deposit cost-basis fields are collapsed until opened because each
 transfer needs its own historical THB cost.
 
 When coins come back to the same Bitkub account after an earlier withdrawal, a
-deposit row also shows a **suggested cost**: the average cost the withdrawn coins
-carried when they left, matched in time order against the quantity withdrawn
-earlier. It is a hint only. Nothing is saved until you press "Use suggested
+deposit row also shows a **suggested cost**: with average cost, the average cost
+the withdrawn coins carried when they left, matched in time order against the
+quantity withdrawn earlier; with By lot, the real cost of the lots withdrawn most
+recently, newest withdrawal first. Coins that were handed to someone else and
+never came back stay in that pool, so a deposit larger than the recent
+withdrawals can be matched to old withdrawals at the wrong cost: check any
+suggestion that is a full match only because of old withdrawals. It is a hint only. Nothing is saved until you press "Use suggested
 cost" (offered only when the whole deposit is matched) and then save the form.
 Moondi makes no suggestion when no earlier withdrawal matches, when the position
 still held an unresolved deposit at the time of the withdrawal, or across

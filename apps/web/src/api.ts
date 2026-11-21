@@ -48,9 +48,12 @@ export type MissingCostBasis = {
   transferId: string
 }
 
+export type CostMethod = 'average' | 'lots'
+
 export type PnlSummary = {
   assets: PnlAsset[]
   complete: boolean
+  costMethod: CostMethod
   historyComplete: boolean
   investedAmount: number | null
   missingCostBasis: MissingCostBasis[]
@@ -90,6 +93,7 @@ export type PriceHistoryPoint = {
 export type AssetPriceHistoryOptions = {
   accountId?: string | undefined
   averageCost?: boolean
+  costMethod?: CostMethod
   days?: number
   from?: number
 }
@@ -245,14 +249,15 @@ export const saveCryptoTransferCostBasis = async (transferId: string, totalCostT
   })
 }
 
-export const loadDashboard = async (accountId?: string): Promise<Dashboard> => {
+export const loadDashboard = async (accountId?: string, costMethod: CostMethod = 'average'): Promise<Dashboard> => {
   const scope = scopedQuery(accountId)
+  const portfolioQuery = [scope.slice(1), costMethod === 'lots' ? 'costMethod=lots' : ''].filter(Boolean).join('&')
   const controller = new AbortController()
   const timeout = window.setTimeout(() => controller.abort(), 15_000)
   const options = { signal: controller.signal }
   try {
     const [portfolio, transactions, history, syncStatus, watchlist, priceAlerts, targets] = await Promise.all([
-      request<Portfolio>(`/api/portfolio?${scope.slice(1)}`, options),
+      request<Portfolio>(`/api/portfolio?${portfolioQuery}`, options),
       request<{ nextCursor: string | null; transactions: Transaction[] }>(`/api/transactions?limit=100${scope}`, options),
       request<{ points: ValueHistoryPoint[] }>(`/api/history/value?days=30${scope}`, options),
       request<{ statuses: SyncStatus[] }>(`/api/sync-status?${scope.slice(1)}`, options),
@@ -275,13 +280,16 @@ export const loadDashboard = async (accountId?: string): Promise<Dashboard> => {
   }
 }
 
-export const loadValueHistory = async ({ accountId, assets, days, from, to }: { accountId?: string | undefined; assets?: readonly string[]; days?: number; from?: number; to?: number }): Promise<ValueHistoryPoint[]> => {
+export const loadValueHistory = async ({ accountId, assets, costMethod, days, from, to }: { accountId?: string | undefined; assets?: readonly string[]; costMethod?: CostMethod; days?: number; from?: number; to?: number }): Promise<ValueHistoryPoint[]> => {
   const query = new URLSearchParams()
   if (days !== undefined) query.set('days', String(days))
   if (from !== undefined) query.set('from', String(from))
   if (to !== undefined) query.set('to', String(to))
   if (accountId) query.set('account', accountId)
-  if (assets && assets.length > 0) query.set('assets', [...new Set(assets)].join(','))
+  if (assets && assets.length > 0) {
+    query.set('assets', [...new Set(assets)].join(','))
+    if (costMethod === 'lots') query.set('costMethod', 'lots')
+  }
   const history = await request<{ points: ValueHistoryPoint[] }>(`/api/history/value?${query.toString()}`)
   return history.points
 }
@@ -291,10 +299,13 @@ export const loadSyncEvents = async (limit = 100, accountId?: string): Promise<S
 )
 
 export const loadAssetPriceHistory = async (asset: string, options: AssetPriceHistoryOptions): Promise<PriceHistoryPoint[]> => {
-  const { accountId, averageCost, days, from } = options
+  const { accountId, averageCost, costMethod, days, from } = options
   const query = new URLSearchParams()
   if (accountId) query.set('account', accountId)
-  if (averageCost) query.set('averageCost', '1')
+  if (averageCost) {
+    query.set('averageCost', '1')
+    if (costMethod === 'lots') query.set('costMethod', 'lots')
+  }
   if (days !== undefined) query.set('days', String(days))
   if (from !== undefined) query.set('from', String(from))
   const history = await request<{ points: PriceHistoryPoint[] }>(`/api/history/price/${encodeURIComponent(asset)}?${query.toString()}`)

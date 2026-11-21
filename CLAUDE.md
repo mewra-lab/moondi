@@ -56,7 +56,7 @@ Bitkub rejects secure calls from some Cloudflare egress. Depending on `BITKUB_SE
 
 - D1 holds sparse balance snapshots (positive assets + THB), prices only for held/watched/alerted assets, and precomputed per-30-minute portfolio/per-asset value summaries. Page loads read those summaries — never recompute from raw history or call an exchange.
 - A historical portfolio-value point is emitted only if every non-THB asset has a price at that snapshot; otherwise it is omitted. Balance and price jobs can finish in either order and each tries to materialize the latest complete snapshot.
-- P&L is withheld (not guessed) for unsupported pairs, missing history, or quantity mismatches (tolerance `2e-7`). Cost basis is average cost per Bitkub account for THB-quoted trades; external crypto deposits need a manual THB cost basis. Valuation is not P&L — keep docs and UI wording consistent with `docs/feature-status.md`.
+- P&L is withheld (not guessed) for unsupported pairs, missing history, or quantity mismatches (tolerance `2e-7`). Cost basis is average cost per Bitkub account for THB-quoted trades (an optional `?costMethod=lots` view reads the same ledger lot by lot; the result carries `costMethod` and KV cache keys include it); external crypto deposits need a manual THB cost basis. Valuation is not P&L — keep docs and UI wording consistent with `docs/feature-status.md`.
 - Accounts are multi-account: each account maps to its own Worker-secret credentials and never falls back to another account's (`account-credentials.ts`).
 
 ### Database

@@ -1,7 +1,7 @@
 import { Hono, type Context } from 'hono'
 import { cors } from 'hono/cors'
 import { createFactory } from 'hono/factory'
-import { calculateAverageCostHistory, calculateAverageCostPnl, calculateOpenCostBasisHistory, portfolioAssetValuesAt, type PnlResult, type PriceQuote } from '@moondi/shared'
+import { calculateAverageCostHistory, calculateAverageCostPnl, calculateOpenCostBasisHistory, portfolioAssetValuesAt, type PnlCostMethod, type PnlResult, type PriceQuote } from '@moondi/shared'
 import { createAwsBitkubRoutes } from './aws-bitkub-routes'
 import { createAwsDcaRoutes } from './aws-dca-routes'
 import { parseDcaIngestion, parseDcaStateRequest, type DcaIngestionBuy } from './dca-ingestion'
@@ -309,9 +309,15 @@ const getHoldings = async (db: D1Database, accountId?: string): Promise<HoldingR
   return result.results
 }
 
-const missingArchivePnl = (accountIds: string[]): PnlResult => ({
+// `?costMethod=` selects how the cost of sold or withdrawn coins is chosen; absent means the average-cost default.
+const parseCostMethod = (value: string | undefined): PnlCostMethod | undefined => (
+  value === undefined || value === 'average' ? 'average' : value === 'lots' ? 'lots' : undefined
+)
+
+const missingArchivePnl = (accountIds: string[], costMethod: PnlCostMethod): PnlResult => ({
   assets: [],
   complete: false,
+  costMethod,
   historyComplete: false,
   investedAmount: null,
   missingCostBasis: [],
@@ -343,7 +349,7 @@ const getPnlArchiveScope = async (db: D1Database, accountId?: string): Promise<P
   return result.results
 }
 
-const getBitkubPnl = async (db: D1Database, holdings: HoldingRow[], archiveScope: PnlArchiveRow[], accountId?: string): Promise<PnlResult> => {
+const getBitkubPnl = async (db: D1Database, holdings: HoldingRow[], archiveScope: PnlArchiveRow[], costMethod: PnlCostMethod, accountId?: string): Promise<PnlResult> => {
   const activeAccountIds = archiveScope.map((account) => account.account_id)
   const scopeClause = accountId ? 'AND id = ?' : ''
   const scopeBindings = accountId ? [accountId] : []
@@ -373,6 +379,7 @@ const getBitkubPnl = async (db: D1Database, holdings: HoldingRow[], archiveScope
   const transfers = (transferResult?.results ?? []) as PnlCryptoTransferRow[]
 
   return calculateAverageCostPnl({
+    costMethod,
     cryptoTransfers: transfers.map((transfer) => ({
       accountId: transfer.account_id,
       amount: transfer.amount,
@@ -456,7 +463,7 @@ const getSelectedAssetValueHistory = async (db: D1Database, from: number, to: nu
   return new Map(result.results.map((row) => [row.interval, row.selected_value]))
 }
 
-const getOpenCostBasisHistory = async (db: D1Database, points: ValueHistoryRow[], assets: string[], accountId?: string): Promise<Array<number | null> | null> => {
+const getOpenCostBasisHistory = async (db: D1Database, points: ValueHistoryRow[], assets: string[], costMethod: PnlCostMethod, accountId?: string): Promise<Array<number | null> | null> => {
   if (assets.length === 0 || points.length === 0) return null
   const placeholders = assets.map(() => '?').join(', ')
   const scopeClause = accountId ? 'AND id = ?' : ''
@@ -489,6 +496,7 @@ const getOpenCostBasisHistory = async (db: D1Database, points: ValueHistoryRow[]
   const transfers = (transferResult?.results ?? []) as PnlCryptoTransferRow[]
   return calculateOpenCostBasisHistory({
     assets,
+    costMethod,
     cryptoTransfers: transfers.map((transfer) => ({
       accountId: transfer.account_id,
       amount: transfer.amount,
@@ -516,7 +524,7 @@ const getOpenCostBasisHistory = async (db: D1Database, points: ValueHistoryRow[]
   })
 }
 
-const getHistoricalAverageCost = async (db: D1Database, asset: string, snapshots: number[], accountId?: string): Promise<Array<number | null>> => {
+const getHistoricalAverageCost = async (db: D1Database, asset: string, snapshots: number[], costMethod: PnlCostMethod, accountId?: string): Promise<Array<number | null>> => {
   if (snapshots.length === 0) return []
   const scopeClause = accountId ? 'AND id = ?' : ''
   const bindings = accountId ? [accountId] : []
@@ -537,6 +545,7 @@ const getHistoricalAverageCost = async (db: D1Database, asset: string, snapshots
   const transfers = (transferResult?.results ?? []) as PnlCryptoTransferRow[]
   return calculateAverageCostHistory({
     asset,
+    costMethod,
     cryptoTransfers: transfers.map((record) => ({ accountId: record.account_id, amount: record.amount, asset: record.asset, direction: record.direction, executedAt: record.executed_at, fee: record.fee, id: record.id })),
     overrides: transfers.flatMap((record) => record.total_cost_thb === null ? [] : [{ totalCostThb: record.total_cost_thb, transferId: record.id }]),
     snapshots,
@@ -548,7 +557,7 @@ const valueHistoryCacheKey = async (from: number, to: number, accountId: string 
   `value-history:v8:${await sha256Hex(`${accountId ?? 'all'}:${[...assets].sort().join(',')}:${costBasisRevision}:${from}:${to}`)}`
 )
 
-const getCachedValueHistory = async (env: Env, from: number, to: number, accountId: string | undefined, assets: string[], costBasisRevision?: string): Promise<ValueHistoryRow[]> => {
+const getCachedValueHistory = async (env: Env, from: number, to: number, accountId: string | undefined, assets: string[], costMethod: PnlCostMethod, costBasisRevision?: string): Promise<ValueHistoryRow[]> => {
   const key = await valueHistoryCacheKey(from, to, accountId, assets, costBasisRevision ?? 'unavailable')
   if (typeof env.CACHE.get === 'function') {
     const cached = await env.CACHE.get<ValueHistoryRow[]>(key, 'json')
@@ -556,7 +565,7 @@ const getCachedValueHistory = async (env: Env, from: number, to: number, account
   }
 
   const valuePoints = await getValueHistory(env.DB, from, to, accountId)
-  const investedValues = costBasisRevision ? await getOpenCostBasisHistory(env.DB, valuePoints, assets, accountId) : null
+  const investedValues = costBasisRevision ? await getOpenCostBasisHistory(env.DB, valuePoints, assets, costMethod, accountId) : null
   const selectedValues = await getSelectedAssetValueHistory(env.DB, from, to, assets, accountId)
   const points = valuePoints.map((point, index) => ({
     ...point,
@@ -627,7 +636,7 @@ const invalidateBitkubPnl = async (cache: KVNamespace, accountId: string, update
   if (typeof cache.put === 'function') await cache.put(pnlRevisionKey(accountId), `${updatedAt}:${crypto.randomUUID()}`)
 }
 
-const getCachedBitkubPnl = async (env: Env, holdings: HoldingRow[], accountId?: string): Promise<{ pnl: PnlResult, revision: string }> => {
+const getCachedBitkubPnl = async (env: Env, holdings: HoldingRow[], costMethod: PnlCostMethod, accountId?: string): Promise<{ pnl: PnlResult, revision: string }> => {
   const archiveScope = await getPnlArchiveScope(env.DB, accountId)
   const missingHistoryAccounts = archiveScope
     .filter((account) => (
@@ -639,9 +648,9 @@ const getCachedBitkubPnl = async (env: Env, holdings: HoldingRow[], accountId?: 
       || account.latest_history_coverage_start !== account.archive_before
     ))
     .map((account) => account.account_id)
-  if (missingHistoryAccounts.length > 0) return { pnl: missingArchivePnl(missingHistoryAccounts), revision: 'unavailable' }
+  if (missingHistoryAccounts.length > 0) return { pnl: missingArchivePnl(missingHistoryAccounts, costMethod), revision: 'unavailable' }
   if (archiveScope.length === 0) return {
-    pnl: calculateAverageCostPnl({ cryptoTransfers: [], holdings: [], overrides: [], trades: [] }),
+    pnl: calculateAverageCostPnl({ costMethod, cryptoTransfers: [], holdings: [], overrides: [], trades: [] }),
     revision: 'empty',
   }
 
@@ -653,6 +662,7 @@ const getCachedBitkubPnl = async (env: Env, holdings: HoldingRow[], accountId?: 
     .reduce((latest, holding) => Math.max(latest, holding.updated_at ?? 0), 0)
   const fingerprint = await sha256Hex(JSON.stringify({
     accountId: accountId ?? 'all',
+    costMethod,
     archiveScope: archiveScope.map((account) => [
       account.account_id,
       account.archive_before,
@@ -664,15 +674,15 @@ const getCachedBitkubPnl = async (env: Env, holdings: HoldingRow[], accountId?: 
     latestHoldingUpdate,
     revisions,
   }))
-  const key = `bitkub-pnl:v5:${fingerprint}`
+  const key = `bitkub-pnl:v6:${fingerprint}`
   if (typeof env.CACHE.get === 'function') {
     const cached = await env.CACHE.get<PnlResult>(key, 'json')
-    if (cached && typeof cached === 'object' && Array.isArray(cached.assets) && typeof cached.complete === 'boolean') {
+    if (cached && typeof cached === 'object' && Array.isArray(cached.assets) && typeof cached.complete === 'boolean' && cached.costMethod === costMethod) {
       return { pnl: cached, revision: fingerprint }
     }
   }
 
-  const pnl = await getBitkubPnl(env.DB, holdings, archiveScope, accountId)
+  const pnl = await getBitkubPnl(env.DB, holdings, archiveScope, costMethod, accountId)
   if (typeof env.CACHE.put === 'function') await env.CACHE.put(key, JSON.stringify(pnl), { expirationTtl: pnlCacheSeconds })
   return { pnl, revision: fingerprint }
 }
@@ -1697,30 +1707,36 @@ const api = factory
   .delete('/cost-basis-overrides/:transferId', removeCryptoTransferCostBasis)
   .get('/portfolio', async (c) => {
     const accountId = c.req.query('account')
+    const costMethod = parseCostMethod(c.req.query('costMethod'))
+    if (!costMethod) return c.json({ error: 'Invalid cost method' }, 400)
     const holdings = await getHoldings(c.env.DB, accountId)
     const totalValue = holdings.reduce((total, holding) => total + (holding.available + holding.reserved) * holding.price, 0)
-    const { pnl } = await getCachedBitkubPnl(c.env, holdings, accountId)
+    const { pnl } = await getCachedBitkubPnl(c.env, holdings, costMethod, accountId)
     return c.json({ holdings, pnl, totalValue, updatedAt: holdings.reduce<number | null>((latest, holding) => Math.max(latest ?? 0, holding.updated_at ?? 0) || null, null) })
   })
   .get('/portfolio/:accountId', async (c) => {
     const accountId = c.req.param('accountId')
+    const costMethod = parseCostMethod(c.req.query('costMethod'))
+    if (!costMethod) return c.json({ error: 'Invalid cost method' }, 400)
     const holdings = await getHoldings(c.env.DB, accountId)
     const totalValue = holdings.reduce((total, holding) => total + (holding.available + holding.reserved) * holding.price, 0)
-    const { pnl } = await getCachedBitkubPnl(c.env, holdings, accountId)
+    const { pnl } = await getCachedBitkubPnl(c.env, holdings, costMethod, accountId)
     return c.json({ accountId, holdings, pnl, totalValue })
   })
   .get('/history/value', async (c) => {
     const { from, to } = historyBounds(c.req.query('from'), c.req.query('to'), c.req.query('days'))
     const accountId = c.req.query('account')
+    const costMethod = parseCostMethod(c.req.query('costMethod'))
+    if (!costMethod) return c.json({ error: 'Invalid cost method' }, 400)
     const assets = normalizeAssets(c.req.query('assets'))
     let costBasisRevision: string | undefined
     if (assets.length > 0) {
       const holdings = await getHoldings(c.env.DB, accountId)
-      const { pnl, revision } = await getCachedBitkubPnl(c.env, holdings, accountId)
+      const { pnl, revision } = await getCachedBitkubPnl(c.env, holdings, costMethod, accountId)
       const byAsset = new Map(pnl.assets.map((asset) => [asset.asset, asset]))
       if (pnl.historyComplete && assets.every((asset) => byAsset.get(asset)?.status === 'ready')) costBasisRevision = revision
     }
-    return c.json({ points: await getCachedValueHistory(c.env, from, to, accountId, assets, costBasisRevision) })
+    return c.json({ points: await getCachedValueHistory(c.env, from, to, accountId, assets, costMethod, costBasisRevision) })
   })
   .get('/history/price/:asset', async (c) => {
     const asset = normalizeAsset(c.req.param('asset'))
@@ -1730,11 +1746,13 @@ const api = factory
     const points = histories[asset] ?? []
     if (c.req.query('averageCost') !== '1') return c.json({ asset, points })
     const accountId = c.req.query('account')
+    const costMethod = parseCostMethod(c.req.query('costMethod'))
+    if (!costMethod) return c.json({ error: 'Invalid cost method' }, 400)
     const holdings = await getHoldings(c.env.DB, accountId)
-    const { pnl } = await getCachedBitkubPnl(c.env, holdings, accountId)
+    const { pnl } = await getCachedBitkubPnl(c.env, holdings, costMethod, accountId)
     const averageCostAvailable = pnl.historyComplete && pnl.assets.some((candidate) => candidate.asset === asset && candidate.status === 'ready')
     const costs = averageCostAvailable
-      ? await getHistoricalAverageCost(c.env.DB, asset, points.map((point) => point.snapshot_at), accountId)
+      ? await getHistoricalAverageCost(c.env.DB, asset, points.map((point) => point.snapshot_at), costMethod, accountId)
       : points.map(() => null)
     return c.json({ asset, averageCostAvailable, points: points.map((point, index) => ({ ...point, average_cost: costs[index] ?? null })) })
   })

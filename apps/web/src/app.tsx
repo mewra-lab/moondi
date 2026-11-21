@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useDeferredValue, useEffect, useId, useMemo, useRef, useState, type ComponentProps, type MouseEvent, type TouchEvent } from 'react'
+import { createContext, lazy, Suspense, useCallback, useContext, useDeferredValue, useEffect, useId, useMemo, useRef, useState, type ComponentProps, type MouseEvent, type TouchEvent } from 'react'
 import { useRegisterSW } from 'virtual:pwa-register/react'
 import { AlertDialog } from '@base-ui/react/alert-dialog'
 import { Button } from '@base-ui/react/button'
@@ -7,7 +7,7 @@ import { Switch } from '@base-ui/react/switch'
 import { AppSelect } from './app-select'
 import { AssetIcon } from './asset-icon'
 import { addPriceAlert, addWatchlistAsset, apiAccessRequired, apiAccessUrl, archiveAccount, loadAccounts, loadArchivedAccounts, loadAssetPriceHistories, loadAssetPriceHistory, loadAssetTradeSummary, loadAssetTrades, loadBackup, loadDashboard, loadDcaActivity, loadPushPublicKey, loadSyncEvents, loadTransactions, loadValueHistory, removeAllocationTarget, removePriceAlert, removePushSubscription, removeWatchlistAsset, restoreAccount, saveAllocationTarget, saveCryptoTransferCostBasis, savePushSubscription, testPushDelivery } from './api'
-import type { Account, AllocationTarget, Dashboard, Holding, PnlAsset, PnlSummary as PnlSummaryData, Portfolio, PriceAlert, PriceHistoryPoint, PushNotificationPreferences, SyncEvent, SyncStatus, TradeMarker, TradeSummary, Transaction, ValueHistoryPoint, WatchlistAsset } from './api'
+import type { Account, AllocationTarget, CostMethod, Dashboard, Holding, PnlAsset, PnlSummary as PnlSummaryData, Portfolio, PriceAlert, PriceHistoryPoint, PushNotificationPreferences, SyncEvent, SyncStatus, TradeMarker, TradeSummary, Transaction, ValueHistoryPoint, WatchlistAsset } from './api'
 import type { DcaActivity, DcaBuy } from '@moondi/shared'
 import { DcaActivityPanel } from './dca-activity'
 import { NotificationCenter, type NotificationItem } from './notification-center'
@@ -88,6 +88,7 @@ const valuesVisibleStorageKey = 'moondi.values-visible.v1'
 const overviewSectionsStorageKey = 'moondi.overview-sections.v4'
 const pnlIgnoredAssetsStorageKey = 'moondi.pnl-ignored-assets.v1'
 const pnlViewStorageKey = 'moondi.pnl-view.v1'
+const costMethodStorageKey = 'moondi.pnl-cost-method.v1'
 const notificationPreferencesStorageKey = 'moondi.notification-preferences.v1'
 const accessMessage = new URLSearchParams(window.location.search).get('__cf_access_message')
 
@@ -119,6 +120,11 @@ const resolveOverviewSections = (): OverviewSections => {
     return defaultOverviewSections
   }
 }
+
+const resolveCostMethod = (): CostMethod => localStorage.getItem(costMethodStorageKey) === 'lots' ? 'lots' : 'average'
+
+// The P&L cost method is a per-browser preference; components that fetch cost-dependent data read it here.
+const CostMethodContext = createContext<CostMethod>('average')
 
 const resolveIgnoredPnlAssets = (): string[] => {
   try {
@@ -416,9 +422,11 @@ const PnlAssetDetails = ({ assets, language, valuesVisible }: { assets: PnlAsset
   )
 }
 
-const PnlPanel = ({ ignoredAssets, language, onSaveCostBasis, pnl, valuesVisible }: {
+const PnlPanel = ({ costMethod, ignoredAssets, language, onCostMethodChange, onSaveCostBasis, pnl, valuesVisible }: {
+  costMethod: CostMethod
   ignoredAssets: readonly string[]
   language: Language
+  onCostMethodChange: (method: CostMethod) => void
   onSaveCostBasis: (transferId: string, totalCostThb: number) => Promise<void>
   pnl: PnlSummaryData
   valuesVisible: boolean
@@ -491,7 +499,13 @@ const PnlPanel = ({ ignoredAssets, language, onSaveCostBasis, pnl, valuesVisible
         <div>
           <p className="eyebrow">Bitkub P&amp;L</p>
           <h2 id="pnl-title">{language === 'th' ? 'กำไร / ขาดทุน' : 'Profit & loss'}</h2>
-          <p className="pnl-note">{language === 'th' ? 'คำนวณแบบต้นทุนเฉลี่ยจากรายการคู่ THB เท่านั้น' : 'Average-cost calculation for THB-quoted Bitkub trades only.'}</p>
+          <p className="pnl-note">{pnl.costMethod === 'lots'
+            ? (language === 'th' ? 'คำนวณแบบตามล็อตจากรายการคู่ THB เท่านั้น: ขายล็อตที่ซื้อล่าสุดก่อน ส่วนการถอนเอาเหรียญที่ซื้อวันเดียวกันก่อน แล้วค่อยล็อตเก่า (วันตามเวลาไทย) เป็นการสมมติว่าเหรียญที่ขายหรือถอนคือล็อตไหน' : 'Lot-based calculation for THB-quoted Bitkub trades only: a sale takes the most recently bought lots first; a withdrawal takes coins bought the same day first (Thailand time), then the oldest lots. This assumes which coins were sold or sent.')
+            : (language === 'th' ? 'คำนวณแบบต้นทุนเฉลี่ยจากรายการคู่ THB เท่านั้น' : 'Average-cost calculation for THB-quoted Bitkub trades only.')}</p>
+        </div>
+        <div aria-label={language === 'th' ? 'วิธีคิดต้นทุน' : 'Cost method'} className="settings-segmented" role="group">
+          <button aria-pressed={costMethod === 'average'} className={costMethod === 'average' ? 'active' : undefined} onClick={() => onCostMethodChange('average')} type="button">{language === 'th' ? 'ต้นทุนเฉลี่ย' : 'Average cost'}</button>
+          <button aria-pressed={costMethod === 'lots'} className={costMethod === 'lots' ? 'active' : undefined} onClick={() => onCostMethodChange('lots')} type="button">{language === 'th' ? 'ตามล็อต' : 'By lot'}</button>
         </div>
       </div>
       <div className="pnl-controls">
@@ -546,7 +560,7 @@ const PnlPanel = ({ ignoredAssets, language, onSaveCostBasis, pnl, valuesVisible
               <span>{transfer.asset} · <span className={valuesVisible ? undefined : 'value-concealed'}>{quantity.format(transfer.amount)}</span> · {dateTime(language).format(transfer.executedAt)}</span>
               <label><span className="sr-only">{language === 'th' ? 'ต้นทุนรวม THB' : 'Total THB cost basis'}</span><Input inputMode="decimal" min="0" onChange={(event) => setDrafts((current) => ({ ...current, [transfer.transferId]: event.target.value }))} placeholder={language === 'th' ? 'ต้นทุนรวม THB' : 'Total THB cost'} type="number" value={drafts[transfer.transferId] ?? ''} /></label>
               <button className="export-button" disabled={workingTransferId === transfer.transferId} type="submit">{workingTransferId === transfer.transferId ? (language === 'th' ? 'กำลังบันทึก…' : 'Saving…') : (language === 'th' ? 'บันทึก' : 'Save')}</button>
-              {transfer.suggestedCostThb !== undefined && transfer.suggestedMatchedQuantity !== undefined ? <CarriedCostSuggestion
+              {transfer.suggestedCostThb !== undefined && transfer.suggestedMatchedQuantity !== undefined ? <CarriedCostSuggestion costMethod={pnl.costMethod}
                 amount={transfer.amount}
                 asset={transfer.asset}
                 costThb={transfer.suggestedCostThb}
@@ -570,9 +584,10 @@ const PnlPanel = ({ ignoredAssets, language, onSaveCostBasis, pnl, valuesVisible
   )
 }
 
-const CarriedCostSuggestion = ({ amount, asset, costThb, language, matchedQuantity, onUse, valuesVisible }: {
+const CarriedCostSuggestion = ({ amount, asset, costMethod, costThb, language, matchedQuantity, onUse, valuesVisible }: {
   amount: number
   asset: string
+  costMethod: CostMethod
   costThb: number
   language: Language
   matchedQuantity: number
@@ -593,7 +608,9 @@ const CarriedCostSuggestion = ({ amount, asset, costThb, language, matchedQuanti
         <span className={concealed}>{money.format(costThb)}</span>
         {fullyMatched ? '' : (language === 'th' ? ' · ส่วนที่เหลือต้องระบุเอง' : ' · the rest needs your own figure')}
       </p>
-      <p>{language === 'th' ? 'เป็นค่าประมาณจากต้นทุนเฉลี่ยตอนโอนออก ไม่ได้บันทึกให้อัตโนมัติ — ตรวจสอบก่อนบันทึก' : 'Estimated from the average cost when the coins left. Nothing is saved automatically — review it before saving.'}</p>
+      <p>{costMethod === 'lots'
+        ? (language === 'th' ? 'เป็นค่าประมาณจากต้นทุนจริงของล็อตที่โอนออกล่าสุด ไม่ได้บันทึกให้อัตโนมัติ — ตรวจสอบก่อนบันทึก' : 'Estimated from the real cost of the lots most recently withdrawn. Nothing is saved automatically — review it before saving.')
+        : (language === 'th' ? 'เป็นค่าประมาณจากต้นทุนเฉลี่ยตอนโอนออก ไม่ได้บันทึกให้อัตโนมัติ — ตรวจสอบก่อนบันทึก' : 'Estimated from the average cost when the coins left. Nothing is saved automatically — review it before saving.')}</p>
       {fullyMatched ? <button className="pnl-review-toggle" onClick={() => onUse((Math.round(costThb * 100) / 100).toString())} type="button">{language === 'th' ? 'ใช้ค่าที่แนะนำ' : 'Use suggested cost'}</button> : null}
     </div>
   )
@@ -901,7 +918,8 @@ const TrackedPrices = ({ holdings, language, onAddAlert, onAddAsset, onRemoveAle
   )
 }
 
-const createPortfolioCardImage = ({ createdAt, holdings, language, pnlAsset, pnlIsSelection, pnlLabel, preset, showPnlAmount, showPnlCostBasis, showPnlCurrentValue, showPnlPercent, totalValue }: {
+const createPortfolioCardImage = ({ costMethod, createdAt, holdings, language, pnlAsset, pnlIsSelection, pnlLabel, preset, showPnlAmount, showPnlCostBasis, showPnlCurrentValue, showPnlPercent, totalValue }: {
+  costMethod: CostMethod
   createdAt: Date
   holdings: Holding[]
   language: Language
@@ -972,7 +990,7 @@ const createPortfolioCardImage = ({ createdAt, holdings, language, pnlAsset, pnl
     context.fillText(headline, 72, 240)
     context.fillStyle = '#9ea7a6'
     context.font = '500 20px system-ui, sans-serif'
-    const secondary = showPnlAmount && showPnlPercent ? `${isThai ? 'ผลตอบแทนจากต้นทุน' : 'Return on cost'} · ${signedPercentage}` : (isThai ? 'กำไร / ขาดทุนจากต้นทุนเฉลี่ย' : 'Average-cost profit & loss')
+    const secondary = showPnlAmount && showPnlPercent ? `${isThai ? 'ผลตอบแทนจากต้นทุน' : 'Return on cost'} · ${signedPercentage}` : (costMethod === 'lots' ? (isThai ? 'กำไร / ขาดทุนจากต้นทุนตามล็อต' : 'Lot-based profit & loss') : (isThai ? 'กำไร / ขาดทุนจากต้นทุนเฉลี่ย' : 'Average-cost profit & loss'))
     context.fillText(secondary, 74, 276)
     context.strokeStyle = '#34414a'
     context.lineWidth = 2
@@ -1010,7 +1028,7 @@ const createPortfolioCardImage = ({ createdAt, holdings, language, pnlAsset, pnl
     context.fillStyle = '#9ea7a6'
     context.font = '500 16px ui-monospace, SFMono-Regular, Menlo, monospace'
     context.fillText(`${generatedLabel} · ${date}`, 72, 576)
-    context.fillText('Average-cost Bitkub P&L · moondi', 72, 604)
+    context.fillText(costMethod === 'lots' ? 'Lot-based Bitkub P&L · moondi' : 'Average-cost Bitkub P&L · moondi', 72, 604)
     return new Promise((resolve, reject) => {
       canvas.toBlob((image) => image ? resolve(image) : reject(new Error('Unable to create image.')), 'image/png')
     })
@@ -1124,6 +1142,7 @@ const PortfolioCardDialog = ({ holdings, ignoredPnlAssets, language, onClose, op
   const cardPnlAsset = pnlScope === 'selection' ? selectedPnlGroup : selectedPnlAsset
   const cardPnlLabel = pnlScope === 'selection' ? (language === 'th' ? `P&L ที่เลือก (${includedPnlAssets.length})` : `Selected P&L (${includedPnlAssets.length})`) : undefined
   const imageOptions = {
+    costMethod: pnl.costMethod,
     holdings,
     language,
     pnlAsset: preset === 'pnl' ? cardPnlAsset : undefined,
@@ -1253,7 +1272,7 @@ const PortfolioCardDialog = ({ holdings, ignoredPnlAssets, language, onClose, op
         </div> : null}
         <div className="portfolio-card-preview"><span>{language === 'th' ? 'ตัวอย่างภาพที่จะส่งออก' : 'Rendered export preview'}</span>{previewUrl ? <img alt={language === 'th' ? 'ตัวอย่างภาพพอร์ต' : 'Portfolio image preview'} src={previewUrl} /> : <div className="portfolio-card-preview-loading">{language === 'th' ? 'กำลังสร้างตัวอย่าง…' : 'Rendering preview…'}</div>}</div>
         <p className="portfolio-card-note">{preset === 'pnl'
-          ? (pnlScope === 'selection' ? (language === 'th' ? 'P&L กลุ่มนี้รวมเฉพาะเหรียญที่ตั้งค่าให้ “รวมในการคำนวณ” และตรวจสอบต้นทุนกับจำนวนได้ครบแล้ว' : 'This group contains only assets set to Included in this browser and verified for cost and quantity.') : (language === 'th' ? 'P&L นี้เป็นการคำนวณต้นทุนเฉลี่ยของคู่ THB ใน Bitkub ไม่ใช่ผลตอบแทนราคา 24 ชั่วโมง' : 'This is average-cost P&L for Bitkub THB pairs, not a 24h price change.'))
+          ? (pnlScope === 'selection' ? (language === 'th' ? 'P&L กลุ่มนี้รวมเฉพาะเหรียญที่ตั้งค่าให้ “รวมในการคำนวณ” และตรวจสอบต้นทุนกับจำนวนได้ครบแล้ว' : 'This group contains only assets set to Included in this browser and verified for cost and quantity.') : (pnl.costMethod === 'lots' ? (language === 'th' ? 'P&L นี้คำนวณตามล็อตของคู่ THB ใน Bitkub ไม่ใช่ผลตอบแทนราคา 24 ชั่วโมง' : 'This is lot-based P&L for Bitkub THB pairs, not a 24h price change.') : (language === 'th' ? 'P&L นี้เป็นการคำนวณต้นทุนเฉลี่ยของคู่ THB ใน Bitkub ไม่ใช่ผลตอบแทนราคา 24 ชั่วโมง' : 'This is average-cost P&L for Bitkub THB pairs, not a 24h price change.')))
           : (language === 'th' ? 'การ์ดนี้ไม่แสดงชื่อบัญชีหรือรายการธุรกรรม' : 'This card excludes account names and transaction data.')}</p>
         <div className="portfolio-card-actions">
           <button className="portfolio-card-primary" disabled={isWorking} onClick={copyImage} type="button">{language === 'th' ? 'คัดลอกรูป' : 'Copy image'}</button>
@@ -1892,6 +1911,7 @@ const PortfolioValueCard = ({ history, language, onOpenHistory, totalValue, upda
 }
 
 const AssetPriceTrend = ({ accountId, asset, averageCost, language, valuesVisible }: { accountId?: string | undefined; asset: string; averageCost: number | null; language: Language; valuesVisible: boolean }) => {
+  const costMethod = useContext(CostMethodContext)
   const [range, setRange] = useState<PriceHistoryRange>('7d')
   const [priceFeed, setPriceFeed] = useState<{ key: string; points: PriceHistoryPoint[]; unavailable: boolean }>()
   const [botFeed, setBotFeed] = useState<{ key: string; activity: DcaActivity | null; unavailable: boolean }>()
@@ -1899,7 +1919,7 @@ const AssetPriceTrend = ({ accountId, asset, averageCost, language, valuesVisibl
   const requestedHistory = useMemo(() => priceHistoryRequest(range), [range, asset, accountId])
   const hasVerifiedAverageCost = averageCost !== null && Number.isFinite(averageCost) && averageCost > 0
   const botFeedKey = JSON.stringify([asset, accountId, range, requestedHistory.from])
-  const priceFeedKey = JSON.stringify([botFeedKey, hasVerifiedAverageCost])
+  const priceFeedKey = JSON.stringify([botFeedKey, hasVerifiedAverageCost, costMethod])
   const currentPriceFeed = priceFeed?.key === priceFeedKey ? priceFeed : undefined
   const points = currentPriceFeed?.points ?? []
   const isLoading = !currentPriceFeed
@@ -1909,7 +1929,7 @@ const AssetPriceTrend = ({ accountId, asset, averageCost, language, valuesVisibl
 
   useEffect(() => {
     let active = true
-    void loadAssetPriceHistory(asset, { ...requestedHistory, accountId, averageCost: hasVerifiedAverageCost })
+    void loadAssetPriceHistory(asset, { ...requestedHistory, accountId, averageCost: hasVerifiedAverageCost, costMethod })
       .then((nextPoints) => {
         if (active) setPriceFeed({ key: priceFeedKey, points: nextPoints, unavailable: false })
       })
@@ -1917,7 +1937,7 @@ const AssetPriceTrend = ({ accountId, asset, averageCost, language, valuesVisibl
         if (active) setPriceFeed({ key: priceFeedKey, points: [], unavailable: true })
       })
     return () => { active = false }
-  }, [accountId, asset, hasVerifiedAverageCost, priceFeedKey, requestedHistory])
+  }, [accountId, asset, costMethod, hasVerifiedAverageCost, priceFeedKey, requestedHistory])
 
   useEffect(() => {
     let active = true
@@ -2082,6 +2102,7 @@ const HistoryView = ({ accountId, initialPoints, investedAssets, language, onBac
   const [range, setRange] = useState<HistoryRange>(30)
   const [scope, setScope] = useState<'portfolio' | 'pnl'>('portfolio')
   const [points, setPoints] = useState(initialPoints)
+  const costMethod = useContext(CostMethodContext)
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [customStart, setCustomStart] = useState(() => formatDateInput(Date.now() - 30 * 24 * 60 * 60 * 1_000))
@@ -2101,7 +2122,7 @@ const HistoryView = ({ accountId, initialPoints, investedAssets, language, onBac
     setIsLoading(true)
     setError(null)
 
-    void loadValueHistory({ ...(range === 'custom' ? customBounds! : { days: range }), accountId, assets: investedAssets })
+    void loadValueHistory({ ...(range === 'custom' ? customBounds! : { days: range }), accountId, assets: investedAssets, costMethod })
       .then((nextPoints) => {
         if (active) setPoints(nextPoints)
       })
@@ -2115,7 +2136,7 @@ const HistoryView = ({ accountId, initialPoints, investedAssets, language, onBac
     return () => {
       active = false
     }
-  }, [accountId, customBounds, initialPoints, investedAssets, language, range])
+  }, [accountId, costMethod, customBounds, initialPoints, investedAssets, language, range])
 
   const hasSelectedPnl = hasSelectedPnlValueHistory(points)
   const displayPoints = scope === 'pnl' && hasSelectedPnl ? selectedPnlHistory(points) : points
@@ -2852,6 +2873,7 @@ export const App = () => {
   const [selectedAsset, setSelectedAsset] = useState<string | null>(initialRoute.selectedAsset)
   const [theme, setTheme] = useState<Theme>(resolveTheme)
   const [language, setLanguage] = useState<Language>(resolveLanguage)
+  const [costMethod, setCostMethod] = useState<CostMethod>(resolveCostMethod)
   const [portfolio, setPortfolio] = useState<Portfolio | null>(null)
   const [transactions, setTransactions] = useState<Transaction[]>([])
   const [nextTransactionCursor, setNextTransactionCursor] = useState<string | null>(null)
@@ -2890,7 +2912,7 @@ export const App = () => {
     dashboardRequestId.current = requestId
     let dashboard: Dashboard
     try {
-      dashboard = await loadDashboard(accountId)
+      dashboard = await loadDashboard(accountId, costMethod)
     } catch (reason) {
       if (dashboardRequestId.current !== requestId) return false
       throw reason
@@ -2908,7 +2930,7 @@ export const App = () => {
     dashboardLoadedAt.current = Date.now()
     setError(null)
     return true
-  }, [])
+  }, [costMethod])
 
   const reloadDashboard = useCallback(async () => {
     return await loadDashboardScope(selectedAccountId)
@@ -2941,7 +2963,7 @@ export const App = () => {
   useEffect(() => {
     if (!portfolio || changingAccountScope) return
     let active = true
-    void loadValueHistory({ accountId: selectedAccountId, assets: investedAssets, days: 30 })
+    void loadValueHistory({ accountId: selectedAccountId, assets: investedAssets, costMethod, days: 30 })
       .then((points) => {
         if (active) setHistory(points)
       })
@@ -2949,7 +2971,7 @@ export const App = () => {
     return () => {
       active = false
     }
-  }, [changingAccountScope, investedAssets, portfolio, selectedAccountId])
+  }, [changingAccountScope, costMethod, investedAssets, portfolio, selectedAccountId])
 
   useEffect(() => {
     if (accessDenied || signedOut) return
@@ -3008,6 +3030,10 @@ export const App = () => {
     document.documentElement.dataset.theme = theme
     localStorage.setItem(themeStorageKey, theme)
   }, [theme])
+
+  useEffect(() => {
+    localStorage.setItem(costMethodStorageKey, costMethod)
+  }, [costMethod])
 
   useEffect(() => {
     localStorage.setItem(valuesVisibleStorageKey, valuesVisible ? 'visible' : 'hidden')
@@ -3205,6 +3231,7 @@ export const App = () => {
   }
 
   return (
+    <CostMethodContext.Provider value={costMethod}>
     <div className="app-layout">
       <div aria-hidden="true" className="status-bar-edge" />
       <aside className="app-sidebar" aria-label={language === 'th' ? 'แถบนำทางด้านข้าง' : 'Sidebar navigation'}>
@@ -3364,7 +3391,7 @@ export const App = () => {
                   {hasAllocationCard ? <PortfolioAllocation language={language} slices={allocationSlices} valuesVisible={valuesVisible} /> : null}
                 </div>
 
-                {overviewSections.pnl && portfolio ? <PnlPanel ignoredAssets={ignoredPnlAssets} language={language} onSaveCostBasis={async (transferId, totalCostThb) => { await saveCryptoTransferCostBasis(transferId, totalCostThb); await reloadDashboard() }} pnl={portfolio.pnl} valuesVisible={valuesVisible} /> : null}
+                {overviewSections.pnl && portfolio ? <PnlPanel costMethod={costMethod} ignoredAssets={ignoredPnlAssets} language={language} onCostMethodChange={setCostMethod} onSaveCostBasis={async (transferId, totalCostThb) => { await saveCryptoTransferCostBasis(transferId, totalCostThb); await reloadDashboard() }} pnl={portfolio.pnl} valuesVisible={valuesVisible} /> : null}
                 {overviewSections.history ? <PortfolioHistory language={language} onOpenHistory={() => navigateTo('history')} points={history} valuesVisible={valuesVisible} /> : null}
                 {overviewSections.targets ? <AllocationTargets holdings={portfolio?.holdings ?? []} language={language} onRemove={async (asset) => { await removeAllocationTarget(asset); setAllocationTargets((current) => current.filter((target) => target.asset !== asset)) }} onSave={async (asset, targetPercent) => { const target = await saveAllocationTarget(asset, targetPercent); setAllocationTargets((current) => [...current.filter((item) => item.asset !== asset), target].toSorted((left, right) => left.asset.localeCompare(right.asset))) }} targets={allocationTargets} /> : null}
                 {overviewSections.rebalance ? <RebalanceAssistant holdings={portfolio?.holdings ?? []} language={language} targets={allocationTargets} valuesVisible={valuesVisible} /> : null}
@@ -3418,5 +3445,6 @@ export const App = () => {
       {portfolio && !changingAccountScope ? <PortfolioCardDialog holdings={portfolio.holdings} ignoredPnlAssets={ignoredPnlAssets} language={language} onClose={() => setIsPortfolioCardOpen(false)} open={isPortfolioCardOpen} pnl={portfolio.pnl} totalValue={portfolio.totalValue} /> : null}
       <SettingsDialog accounts={accounts} archivedAccounts={archivedAccounts} ignoredPnlAssets={ignoredPnlAssets} language={language} onArchiveAccount={disconnectAccount} onClose={() => setIsSettingsOpen(false)} onRestoreAccount={reconnectAccount} open={isSettingsOpen} overviewSections={overviewSections} pnlAssets={changingAccountScope ? [] : portfolio?.pnl.assets ?? []} setIgnoredPnlAssets={setIgnoredPnlAssets} setLanguage={setLanguage} setOverviewSection={(section, visible) => setOverviewSections((current) => ({ ...current, [section]: visible }))} setTheme={setTheme} setValuesVisible={setValuesVisible} theme={theme} valuesVisible={valuesVisible} />
     </div>
+    </CostMethodContext.Provider>
   )
 }

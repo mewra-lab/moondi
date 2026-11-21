@@ -314,6 +314,17 @@ Keep it simple and correct rather than clever:
    UI since it affects displayed numbers):
    - On each buy: `new_avg_cost = (old_qty * old_avg_cost + buy_qty * buy_price) / (old_qty + buy_qty)`.
    - On each sell: reduce quantity, **realized P&L** += `sell_qty * (sell_price − avg_cost_at_time_of_sale)`.
+   - **Optional lots method** (`?costMethod=lots`, chosen per browser, average
+     cost stays the default): every buy or deposit is its own lot. A sale takes
+     the most recently acquired lots first. A withdrawal takes lots acquired on
+     the same Thailand calendar day (UTC+7) first, newest first, then the oldest
+     lots. This is an explicit *assumption* about which coins were sold or sent;
+     it exists because average cost drains the cost of old coins when someone
+     repeatedly buys and sends coins to a wallet (each send removes the pooled
+     average, not the price just paid). The suggested cost for a returning
+     deposit uses the real cost of the most recently withdrawn lots. The result
+     carries `costMethod` and caches are keyed by it. Nothing is stored: the
+     method only changes how the same ledger is read.
    - Crypto deposits from outside the exchange (e.g. moved in from a
      hardware wallet) need a manual cost-basis entry, since the exchange has
      no idea what you paid — expose a simple "edit cost basis" UI field for

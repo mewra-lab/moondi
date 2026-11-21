@@ -356,3 +356,190 @@ describe('suggestCarriedCostBasis', () => {
     expect(result.complete).toBe(false)
   })
 })
+
+describe('recent-lots cost method', () => {
+  // Thailand has no DST, so the lot day is the UTC+7 calendar day; hours below are UTC.
+  const at = (day: number, hour = 3) => Date.UTC(2026, 0, day, hour)
+  const buy = (id: string, executedAt: number, amount: number, costThb: number) => ({ amount, baseAsset: 'XAAA', executedAt, fee: 0, feeAsset: 'THB', id, price: costThb / amount, quoteAmount: costThb, quoteAsset: 'THB', side: 'buy' as const })
+  const sell = (id: string, executedAt: number, amount: number, proceedsThb: number) => ({ amount, baseAsset: 'XAAA', executedAt, fee: 0, feeAsset: 'THB', id, price: proceedsThb / amount, quoteAmount: proceedsThb, quoteAsset: 'THB', side: 'sell' as const })
+  const withdraw = (id: string, executedAt: number, amount: number, fee = 0) => ({ amount, asset: 'XAAA', direction: 'withdraw' as const, executedAt, fee, id })
+  const deposit = (id: string, executedAt: number, amount: number) => ({ amount, asset: 'XAAA', direction: 'deposit' as const, executedAt, fee: 0, id })
+  const asset = (result: ReturnType<typeof calculateAverageCostPnl>) => result.assets[0]!
+
+  it('uses the average-cost method unless the lots method is requested', () => {
+    const result = calculateAverageCostPnl({ cryptoTransfers: [], holdings: [{ amount: 100, asset: 'XAAA', price: 1 }], overrides: [], trades: [buy('b', at(1), 100, 100)] })
+
+    expect(result.costMethod).toBe('average')
+    expect(calculateAverageCostPnl({ costMethod: 'lots', cryptoTransfers: [], holdings: [{ amount: 100, asset: 'XAAA', price: 1 }], overrides: [], trades: [buy('b', at(1), 100, 100)] }).costMethod).toBe('lots')
+  })
+
+  it('gives the same result as average cost when nothing is ever sold or withdrawn', () => {
+    const input = { cryptoTransfers: [], holdings: [{ amount: 300, asset: 'XAAA', price: 2 }], overrides: [], trades: [buy('a', at(1), 100, 100), buy('b', at(2), 100, 10), buy('c', at(3), 100, 50)] }
+
+    expect({ ...calculateAverageCostPnl({ ...input, costMethod: 'lots' }), costMethod: 'average' }).toEqual(calculateAverageCostPnl(input))
+  })
+
+  it('sells the most recently bought lot first and keeps the older cost', () => {
+    const input = { cryptoTransfers: [], holdings: [{ amount: 100, asset: 'XAAA', price: 2 }], overrides: [], trades: [buy('old', at(1), 100, 100), buy('new', at(2), 100, 10), sell('sale', at(3), 100, 50)] }
+    const lots = asset(calculateAverageCostPnl({ ...input, costMethod: 'lots' }))
+    const average = asset(calculateAverageCostPnl(input))
+
+    expect(lots).toMatchObject({ costBasis: 100, realizedCostBasis: 10, realizedPnl: 40, status: 'ready', unrealizedPnl: 100 })
+    expect(average).toMatchObject({ costBasis: 55, realizedPnl: -5 })
+  })
+
+  it('sends coins bought the same day out first when they are withdrawn', () => {
+    const input = { cryptoTransfers: [withdraw('out', at(5, 9), 100)], holdings: [{ amount: 100, asset: 'XAAA', price: 1 }], overrides: [], trades: [buy('old', at(1), 100, 100), buy('new', at(5, 2), 100, 10)] }
+
+    expect(asset(calculateAverageCostPnl({ ...input, costMethod: 'lots' })).costBasis).toBe(100)
+    expect(asset(calculateAverageCostPnl(input)).costBasis).toBe(55)
+  })
+
+  it('takes the oldest lots first when nothing was bought on the day of the withdrawal', () => {
+    const result = calculateAverageCostPnl({
+      costMethod: 'lots',
+      cryptoTransfers: [withdraw('out', at(6), 100)],
+      holdings: [{ amount: 100, asset: 'XAAA', price: 1 }],
+      overrides: [],
+      trades: [buy('old', at(1), 100, 100), buy('new', at(5), 100, 10)],
+    })
+
+    expect(asset(result)).toMatchObject({ costBasis: 10, realizedPnl: 0, status: 'ready' })
+  })
+
+  it('prefers the newest of the same-day lots, then the oldest remaining lots', () => {
+    const result = calculateAverageCostPnl({
+      costMethod: 'lots',
+      cryptoTransfers: [withdraw('out', at(5, 9), 80)],
+      holdings: [{ amount: 120, asset: 'XAAA', price: 1 }],
+      overrides: [],
+      trades: [buy('old', at(1), 100, 100), buy('morning', at(5, 1), 50, 10), buy('noon', at(5, 5), 50, 30)],
+    })
+
+    // 50 from "noon" (30), 30 from "morning" (6): what stays is the old lot plus 20 of "morning".
+    expect(asset(result).costBasis).toBeCloseTo(100 + 4, 9)
+  })
+
+  it('treats the Thailand calendar day, not the UTC day, as the same day', () => {
+    const trades = [buy('old', at(1), 100, 100), buy('late', Date.UTC(2026, 0, 5, 16, 59), 100, 10)]
+    const run = (withdrawalAt: number) => asset(calculateAverageCostPnl({
+      costMethod: 'lots',
+      cryptoTransfers: [withdraw('out', withdrawalAt, 100)],
+      holdings: [{ amount: 100, asset: 'XAAA', price: 1 }],
+      overrides: [],
+      trades,
+    })).costBasis
+
+    expect(run(Date.UTC(2026, 0, 5, 16, 59, 30))).toBe(100) // still 5 Jan in Thailand
+    expect(run(Date.UTC(2026, 0, 5, 17, 1))).toBe(10) // already 6 Jan in Thailand
+  })
+
+  it('counts the withdrawal fee as coins that left the lots', () => {
+    const result = calculateAverageCostPnl({
+      costMethod: 'lots',
+      cryptoTransfers: [withdraw('out', at(5, 9), 60, 1)],
+      holdings: [{ amount: 39, asset: 'XAAA', price: 1 }],
+      overrides: [],
+      trades: [buy('only', at(5, 2), 100, 100)],
+    })
+
+    expect(asset(result)).toMatchObject({ costBasis: 39, quantity: 39, status: 'ready' })
+  })
+
+  it('treats a deposit with a cost basis as a lot of its own', () => {
+    const result = calculateAverageCostPnl({
+      costMethod: 'lots',
+      cryptoTransfers: [deposit('in', at(2), 100)],
+      holdings: [{ amount: 100, asset: 'XAAA', price: 3 }],
+      overrides: [{ totalCostThb: 20, transferId: 'in' }],
+      trades: [buy('bought', at(1), 100, 100), sell('sale', at(3), 100, 300)],
+    })
+
+    expect(asset(result)).toMatchObject({ costBasis: 100, realizedCostBasis: 20, realizedPnl: 280 })
+  })
+
+  it('still withholds P&L for a deposit without a cost basis and for a quantity mismatch', () => {
+    const missing = calculateAverageCostPnl({ costMethod: 'lots', cryptoTransfers: [deposit('in', at(2), 10)], holdings: [{ amount: 110, asset: 'XAAA', price: 1 }], overrides: [], trades: [buy('b', at(1), 100, 100)] })
+    const mismatch = calculateAverageCostPnl({ costMethod: 'lots', cryptoTransfers: [], holdings: [{ amount: 90, asset: 'XAAA', price: 1 }], overrides: [], trades: [buy('b', at(1), 100, 100)] })
+
+    expect(asset(missing).status).toBe('missing_cost_basis')
+    expect(asset(mismatch).status).toBe('quantity_mismatch')
+  })
+
+  it('does not let a sale of more than the position pretend to close it', () => {
+    const result = calculateAverageCostPnl({ costMethod: 'lots', cryptoTransfers: [], holdings: [], overrides: [], trades: [buy('b', at(1), 100, 100), sell('s', at(2), 150, 150)] })
+
+    expect(asset(result).status).toBe('quantity_mismatch')
+  })
+
+  it('closes the whole position when a sale leaves only rounding dust', () => {
+    const result = calculateAverageCostPnl({
+      costMethod: 'lots',
+      cryptoTransfers: [],
+      holdings: [],
+      overrides: [],
+      trades: [buy('b', at(1), 100, 1000), sell('s', at(2), 99.99999999, 1100)],
+    })
+
+    expect(asset(result)).toMatchObject({ costBasis: 0, quantity: 0, status: 'ready' })
+  })
+
+  it('returns a withdrawn lot’s real cost to the deposit that brings it back', () => {
+    const input = {
+      cryptoTransfers: [withdraw('out', at(5, 9), 100), deposit('back', at(9), 100)],
+      overrides: [],
+      trades: [buy('old', at(1), 100, 1000), buy('new', at(5, 2), 100, 10)],
+    }
+
+    expect(suggestCarriedCostBasis({ ...input, costMethod: 'lots' }).get('back')).toEqual({ costThb: 10, matchedQuantity: 100 })
+    expect(suggestCarriedCostBasis(input).get('back')).toEqual({ costThb: 505, matchedQuantity: 100 })
+  })
+
+  it('matches a returning deposit to the most recent withdrawal first, at that withdrawal’s real cost', () => {
+    const input = {
+      cryptoTransfers: [withdraw('out-old', at(3, 9), 100), withdraw('out-new', at(5, 9), 100), deposit('back-1', at(9), 100), deposit('back-2', at(10), 100)],
+      overrides: [],
+      trades: [buy('old', at(1), 100, 1000), buy('new', at(5, 2), 100, 10)],
+    }
+    const lots = suggestCarriedCostBasis({ ...input, costMethod: 'lots' })
+
+    expect(lots.get('back-1')).toEqual({ costThb: 10, matchedQuantity: 100 })
+    expect(lots.get('back-2')).toEqual({ costThb: 1000, matchedQuantity: 100 })
+    expect(suggestCarriedCostBasis(input).get('back-1')).toEqual({ costThb: 505, matchedQuantity: 100 })
+  })
+
+  it('splits a returning deposit across withdrawals, newest withdrawal first', () => {
+    const suggestions = suggestCarriedCostBasis({
+      costMethod: 'lots',
+      cryptoTransfers: [withdraw('out-old', at(3, 9), 100), withdraw('out-new', at(5, 9), 50), deposit('back', at(9), 120)],
+      overrides: [],
+      trades: [buy('old', at(1), 100, 1000), buy('new', at(5, 2), 50, 5)],
+    })
+
+    // 50 coins at 5 THB from the newest withdrawal, then 70 coins at 10 THB from the older one.
+    expect(suggestions.get('back')).toEqual({ costThb: 5 + 700, matchedQuantity: 120 })
+  })
+
+  it('applies the lots method to the historical cost lines', () => {
+    const trades = [buy('old', at(1), 100, 100), buy('new', at(5, 2), 100, 10)]
+    const cryptoTransfers = [withdraw('out', at(5, 9), 100)]
+    const snapshots = [at(1, 12), at(5, 12), at(6)]
+
+    expect(calculateOpenCostBasisHistory({ assets: ['XAAA'], costMethod: 'lots', cryptoTransfers, overrides: [], snapshots, trades })).toEqual([100, 100, 100])
+    expect(calculateOpenCostBasisHistory({ assets: ['XAAA'], cryptoTransfers, overrides: [], snapshots, trades })).toEqual([100, 55, 55])
+    expect(calculateAverageCostHistory({ asset: 'XAAA', costMethod: 'lots', cryptoTransfers, overrides: [], snapshots, trades })).toEqual([1, 1, 1])
+  })
+
+  it('keeps a typical buy-then-send-to-wallet pattern from draining an old position’s cost', () => {
+    const trades = [buy('core', at(1), 1000, 1000)]
+    const cryptoTransfers = []
+    for (let day = 2; day < 12; day += 1) {
+      trades.push(buy(`dca-${day}`, at(day, 2), 100, 10))
+      cryptoTransfers.push(withdraw(`out-${day}`, at(day, 8), 100))
+    }
+    const input = { cryptoTransfers, holdings: [{ amount: 1000, asset: 'XAAA', price: 1 }], overrides: [], trades }
+
+    expect(asset(calculateAverageCostPnl({ ...input, costMethod: 'lots' })).costBasis).toBe(1000)
+    expect(asset(calculateAverageCostPnl(input)).costBasis).toBeLessThan(500)
+  })
+})

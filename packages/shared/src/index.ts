@@ -108,6 +108,16 @@ export type CostBasisOverride = {
   totalCostThb: number
 }
 
+/**
+ * How the cost of sold or withdrawn coins is chosen.
+ * - `average`: one pooled average cost per position (the documented default).
+ * - `lots`: every buy or deposit is its own lot. A sale takes the most recently acquired lots first.
+ *   A withdrawal takes coins acquired on the same (Thailand) calendar day first, newest first,
+ *   then the oldest remaining lots. This approximates "the coins I just bought are the ones I sent
+ *   to my wallet" and keeps the cost of older coins that never moved.
+ */
+export type PnlCostMethod = 'average' | 'lots'
+
 export type PnlAssetStatus =
   | 'ready'
   | 'missing_cost_basis'
@@ -147,6 +157,7 @@ export type MissingCostBasis = {
 export type PnlResult = {
   assets: PnlAsset[]
   complete: boolean
+  costMethod: PnlCostMethod
   historyComplete: boolean
   investedAmount: number | null
   missingHistoryAccounts: string[]
@@ -156,10 +167,17 @@ export type PnlResult = {
   unrealizedPnl: number | null
 }
 
+type PnlLot = {
+  cost: number
+  day: number
+  quantity: number
+}
+
 type PnlPosition = {
   accountId: string
   asset: string
   cost: number
+  lots: PnlLot[]
   quantity: number
   quantityUncertainty: number
   realizedCostBasis: number
@@ -192,12 +210,44 @@ const pnlPosition = (positions: Map<string, PnlPosition>, accountId: string | un
   const key = pnlPositionKey(accountId, asset)
   const current = positions.get(key)
   if (current) return current
-  const created: PnlPosition = { accountId: accountId ?? '', asset, cost: 0, quantity: 0, quantityUncertainty: 0, realizedCostBasis: 0, realizedPnl: 0, reasons: new Set() }
+  const created: PnlPosition = { accountId: accountId ?? '', asset, cost: 0, lots: [], quantity: 0, quantityUncertainty: 0, realizedCostBasis: 0, realizedPnl: 0, reasons: new Set() }
   positions.set(key, created)
   return created
 }
 
-const closePosition = (position: PnlPosition, amount: number): number | undefined => {
+const thailandOffsetMs = 7 * 3_600_000
+
+const pnlLotDay = (executedAt: number): number => Math.floor((executedAt + thailandOffsetMs) / 86_400_000)
+
+const consumeLots = (position: PnlPosition, amount: number, withdrawalDay: number | undefined): number => {
+  const lots = position.lots
+  const order = withdrawalDay === undefined
+    ? [...lots].reverse()
+    : [...lots.filter((lot) => lot.day === withdrawalDay).reverse(), ...lots.filter((lot) => lot.day !== withdrawalDay)]
+  let remaining = amount
+  let cost = 0
+  for (const lot of order) {
+    if (remaining <= 0) break
+    if (lot.quantity <= remaining) {
+      remaining -= lot.quantity
+      cost += lot.cost
+      lot.quantity = 0
+      lot.cost = 0
+    } else {
+      const taken = lot.cost * remaining / lot.quantity
+      lot.quantity -= remaining
+      lot.cost -= taken
+      cost += taken
+      remaining = 0
+    }
+  }
+  position.lots = lots.filter((lot) => lot.quantity > 1e-12)
+  return cost
+}
+
+type LotRule = { withdrawalDay?: number }
+
+const closePosition = (position: PnlPosition, amount: number, lotRule?: LotRule): number | undefined => {
   const slack = pnlQuantityTolerance + position.quantityUncertainty
   if (!finiteNonNegative(amount) || position.quantity + slack < amount) {
     position.reasons.add('quantity_mismatch')
@@ -205,12 +255,13 @@ const closePosition = (position: PnlPosition, amount: number): number | undefine
   }
   if (position.quantity <= pnlQuantityTolerance) return 0
   const closedAmount = position.quantity - amount <= slack ? position.quantity : amount
-  const cost = position.cost * closedAmount / position.quantity
+  const cost = lotRule ? consumeLots(position, closedAmount, lotRule.withdrawalDay) : position.cost * closedAmount / position.quantity
   position.quantity -= closedAmount
   position.cost -= cost
   if (position.quantity <= pnlQuantityTolerance) {
     position.quantity = 0
     position.cost = 0
+    position.lots = []
   }
   return cost
 }
@@ -226,7 +277,7 @@ const sortedPnlEvents = (trades: PnlTrade[], cryptoTransfers: PnlCryptoTransfer[
   return left.record.id.localeCompare(right.record.id)
 })
 
-const applyCostBasisEvent = (positions: Map<string, PnlPosition>, event: PnlEvent, overridesByTransfer: ReadonlyMap<string, number>): void => {
+const applyCostBasisEvent = (positions: Map<string, PnlPosition>, event: PnlEvent, overridesByTransfer: ReadonlyMap<string, number>, method: PnlCostMethod): void => {
   if (event.kind === 'crypto_transfer') {
     const transfer = event.record
     const position = pnlPosition(positions, transfer.accountId, transfer.asset)
@@ -242,9 +293,10 @@ const applyCostBasisEvent = (positions: Map<string, PnlPosition>, event: PnlEven
       } else {
         position.cost += override
       }
+      if (method === 'lots') position.lots.push({ cost: override ?? 0, day: pnlLotDay(transfer.executedAt), quantity: transfer.amount })
       return
     }
-    closePosition(position, transfer.amount + transfer.fee)
+    closePosition(position, transfer.amount + transfer.fee, method === 'lots' ? { withdrawalDay: pnlLotDay(transfer.executedAt) } : undefined)
     return
   }
 
@@ -267,9 +319,10 @@ const applyCostBasisEvent = (positions: Map<string, PnlPosition>, event: PnlEven
     position.quantity += trade.amount
     if (trade.price > 0 && Number.isFinite(trade.price)) position.quantityUncertainty += pnlBuyRoundingThb / trade.price
     position.cost += quoteAmount + trade.fee
+    if (method === 'lots') position.lots.push({ cost: quoteAmount + trade.fee, day: pnlLotDay(trade.executedAt), quantity: trade.amount })
     return
   }
-  const soldCost = closePosition(position, trade.amount)
+  const soldCost = closePosition(position, trade.amount, method === 'lots' ? {} : undefined)
   if (soldCost !== undefined) {
     position.realizedCostBasis += soldCost
     position.realizedPnl += quoteAmount - trade.fee - soldCost
@@ -279,10 +332,12 @@ const applyCostBasisEvent = (positions: Map<string, PnlPosition>, event: PnlEven
 type TransitPool = { cost: number, quantity: number }
 
 export const suggestCarriedCostBasis = ({
+  costMethod = 'average',
   cryptoTransfers,
   overrides,
   trades,
 }: {
+  costMethod?: PnlCostMethod
   cryptoTransfers: PnlCryptoTransfer[]
   overrides: CostBasisOverride[]
   trades: PnlTrade[]
@@ -292,11 +347,13 @@ export const suggestCarriedCostBasis = ({
     .map((override) => [override.transferId, override.totalCostThb]))
   const positions = new Map<string, PnlPosition>()
   const pools = new Map<string, TransitPool>()
+  // Lots method: each withdrawal stays a separate segment at its own real cost; the newest comes back first.
+  const transit = new Map<string, TransitPool[]>()
   const suggestions = new Map<string, CarriedCostSuggestion>()
 
   for (const event of sortedPnlEvents(trades, cryptoTransfers)) {
     if (event.kind !== 'crypto_transfer') {
-      applyCostBasisEvent(positions, event, overridesByTransfer)
+      applyCostBasisEvent(positions, event, overridesByTransfer, costMethod)
       continue
     }
 
@@ -307,11 +364,17 @@ export const suggestCarriedCostBasis = ({
       const quantityBefore = position.quantity
       const costBefore = position.cost
       const trusted = position.reasons.size === 0
-      applyCostBasisEvent(positions, event, overridesByTransfer)
+      applyCostBasisEvent(positions, event, overridesByTransfer, costMethod)
       const closedQuantity = quantityBefore - position.quantity
       if (!trusted || position.reasons.size > 0 || !finiteNonNegative(transfer.amount) || transfer.amount <= pnlQuantityTolerance || closedQuantity <= pnlQuantityTolerance) continue
       const carriedQuantity = Math.min(transfer.amount, closedQuantity)
       const carriedCost = (costBefore - position.cost) * carriedQuantity / closedQuantity
+      if (costMethod === 'lots') {
+        const segments = transit.get(key) ?? []
+        segments.push({ cost: carriedCost, quantity: carriedQuantity })
+        transit.set(key, segments)
+        continue
+      }
       const pool = pools.get(key) ?? { cost: 0, quantity: 0 }
       pool.cost += carriedCost
       pool.quantity += carriedQuantity
@@ -319,7 +382,29 @@ export const suggestCarriedCostBasis = ({
       continue
     }
 
-    applyCostBasisEvent(positions, event, overridesByTransfer)
+    applyCostBasisEvent(positions, event, overridesByTransfer, costMethod)
+    if (costMethod === 'lots') {
+      const segments = transit.get(key)
+      if (!segments || !finiteNonNegative(transfer.amount) || transfer.amount <= pnlQuantityTolerance) continue
+      let remaining = transfer.amount
+      let matchedQuantity = 0
+      let costThb = 0
+      while (remaining > pnlQuantityTolerance && segments.length > 0) {
+        const segment = segments[segments.length - 1]!
+        const taken = Math.min(remaining, segment.quantity)
+        const takenCost = segment.cost * taken / segment.quantity
+        segment.quantity -= taken
+        segment.cost -= takenCost
+        matchedQuantity += taken
+        costThb += takenCost
+        remaining -= taken
+        if (segment.quantity <= pnlQuantityTolerance) segments.pop()
+      }
+      if (overridesByTransfer.get(transfer.id) === undefined && matchedQuantity > pnlQuantityTolerance && Number.isFinite(costThb)) {
+        suggestions.set(transfer.id, { costThb, matchedQuantity })
+      }
+      continue
+    }
     const pool = pools.get(key)
     if (!pool || !finiteNonNegative(transfer.amount) || transfer.amount <= pnlQuantityTolerance || pool.quantity <= pnlQuantityTolerance) continue
     const matchedQuantity = Math.min(transfer.amount, pool.quantity)
@@ -339,12 +424,14 @@ export const suggestCarriedCostBasis = ({
 
 export const calculateOpenCostBasisHistory = ({
   assets,
+  costMethod = 'average',
   cryptoTransfers,
   overrides,
   snapshots,
   trades,
 }: {
   assets: readonly string[]
+  costMethod?: PnlCostMethod
   cryptoTransfers: PnlCryptoTransfer[]
   overrides: CostBasisOverride[]
   snapshots: readonly number[]
@@ -363,7 +450,7 @@ export const calculateOpenCostBasisHistory = ({
 
   return snapshots.map((snapshotAt) => {
     while (eventIndex < events.length && events[eventIndex]!.record.executedAt <= snapshotAt) {
-      applyCostBasisEvent(positions, events[eventIndex]!, overridesByTransfer)
+      applyCostBasisEvent(positions, events[eventIndex]!, overridesByTransfer, costMethod)
       eventIndex += 1
     }
     const matching = [...positions.values()].filter((position) => selectedAssets.has(position.asset))
@@ -374,12 +461,14 @@ export const calculateOpenCostBasisHistory = ({
 
 export const calculateAverageCostHistory = ({
   asset,
+  costMethod = 'average',
   cryptoTransfers,
   overrides,
   snapshots,
   trades,
 }: {
   asset: string
+  costMethod?: PnlCostMethod
   cryptoTransfers: PnlCryptoTransfer[]
   overrides: CostBasisOverride[]
   snapshots: readonly number[]
@@ -391,7 +480,7 @@ export const calculateAverageCostHistory = ({
   let eventIndex = 0
   return snapshots.map((snapshotAt) => {
     while (eventIndex < events.length && events[eventIndex]!.record.executedAt <= snapshotAt) {
-      applyCostBasisEvent(positions, events[eventIndex]!, overridesByTransfer)
+      applyCostBasisEvent(positions, events[eventIndex]!, overridesByTransfer, costMethod)
       eventIndex += 1
     }
     const matching = [...positions.values()].filter((position) => position.asset === asset)
@@ -402,11 +491,13 @@ export const calculateAverageCostHistory = ({
 }
 
 export const calculateAverageCostPnl = ({
+  costMethod = 'average',
   cryptoTransfers,
   holdings,
   overrides,
   trades,
 }: {
+  costMethod?: PnlCostMethod
   cryptoTransfers: PnlCryptoTransfer[]
   holdings: PnlHolding[]
   overrides: CostBasisOverride[]
@@ -417,7 +508,7 @@ export const calculateAverageCostPnl = ({
     .map((override) => [override.transferId, override.totalCostThb]))
   const positions = new Map<string, PnlPosition>()
   const missingCostBasis: MissingCostBasis[] = []
-  const suggestions = suggestCarriedCostBasis({ cryptoTransfers, overrides, trades })
+  const suggestions = suggestCarriedCostBasis({ costMethod, cryptoTransfers, overrides, trades })
   const events = sortedPnlEvents(trades, cryptoTransfers)
   for (const event of events) {
     if (event.kind === 'crypto_transfer' && event.record.direction === 'deposit' && finiteNonNegative(event.record.amount) && overridesByTransfer.get(event.record.id) === undefined) {
@@ -430,7 +521,7 @@ export const calculateAverageCostPnl = ({
         transferId: event.record.id,
       })
     }
-    applyCostBasisEvent(positions, event, overridesByTransfer)
+    applyCostBasisEvent(positions, event, overridesByTransfer, costMethod)
   }
 
   const holdingsByPosition = new Map<string, PnlHolding>()
@@ -510,6 +601,7 @@ export const calculateAverageCostPnl = ({
   return {
     assets,
     complete,
+    costMethod,
     historyComplete: true,
     investedAmount,
     missingHistoryAccounts: [],
