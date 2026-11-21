@@ -714,6 +714,9 @@ const awsIngestionMaxAgeMs = 5 * 60 * 1_000
 const awsIngestionMaxBodyBytes = 512 * 1_024
 const awsIngestionMaxHistoryRecords = 250
 const maxAssetsPerQuery = 96
+const maxTradeMarkers = 1_000
+
+type TradeMarkerRow = { amount: number; executed_at: number; id: string; price: number; side: 'buy' | 'sell' }
 
 const verifyAwsIngestion = async (secret: string, timestamp: string, nonce: string, body: string, signature: string): Promise<boolean> => {
   const signatureBytes = Uint8Array.from(signature.match(/.{2}/g) ?? [], (byte) => Number.parseInt(byte, 16))
@@ -1645,6 +1648,29 @@ const api = factory
       ? await getHistoricalAverageCost(c.env.DB, asset, points.map((point) => point.snapshot_at), accountId)
       : points.map(() => null)
     return c.json({ asset, averageCostAvailable, points: points.map((point, index) => ({ ...point, average_cost: costs[index] ?? null })) })
+  })
+  .get('/history/trades/:asset', async (c) => {
+    const asset = normalizeAsset(c.req.param('asset'))
+    if (!asset) return c.json({ error: 'Invalid asset' }, 400)
+    const { from, to } = historyBounds(c.req.query('from'), c.req.query('to'), c.req.query('days'))
+    const accountId = c.req.query('account')
+    const bindings: Array<string | number> = [asset, from, to]
+    if (accountId) bindings.push(accountId)
+    bindings.push(maxTradeMarkers)
+    const result = await c.env.DB.prepare(`
+      SELECT trades.id, trades.side, trades.executed_at, trades.price, trades.amount
+      FROM trades
+      JOIN accounts ON accounts.id = trades.account_id
+      WHERE accounts.archived_at IS NULL
+        AND trades.base_asset = ?
+        AND trades.quote_asset = 'THB'
+        AND trades.executed_at >= ?
+        AND trades.executed_at <= ?
+        ${accountId ? 'AND trades.account_id = ?' : ''}
+      ORDER BY trades.executed_at DESC, trades.id DESC
+      LIMIT ?
+    `).bind(...bindings).all<TradeMarkerRow>()
+    return c.json({ asset, trades: [...result.results].reverse() })
   })
   .get('/history/prices', async (c) => {
     const assets = normalizeAssets(c.req.query('assets'))

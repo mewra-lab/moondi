@@ -6,8 +6,8 @@ import { Input } from '@base-ui/react/input'
 import { Switch } from '@base-ui/react/switch'
 import { AppSelect } from './app-select'
 import { AssetIcon } from './asset-icon'
-import { addPriceAlert, addWatchlistAsset, apiAccessRequired, apiAccessUrl, archiveAccount, loadAccounts, loadArchivedAccounts, loadAssetPriceHistories, loadAssetPriceHistory, loadBackup, loadDashboard, loadDcaActivity, loadPushPublicKey, loadSyncEvents, loadTransactions, loadValueHistory, removeAllocationTarget, removePriceAlert, removePushSubscription, removeWatchlistAsset, restoreAccount, saveAllocationTarget, saveCryptoTransferCostBasis, savePushSubscription, testPushDelivery } from './api'
-import type { Account, AllocationTarget, Dashboard, Holding, PnlAsset, PnlSummary as PnlSummaryData, Portfolio, PriceAlert, PriceHistoryPoint, PushNotificationPreferences, SyncEvent, SyncStatus, Transaction, ValueHistoryPoint, WatchlistAsset } from './api'
+import { addPriceAlert, addWatchlistAsset, apiAccessRequired, apiAccessUrl, archiveAccount, loadAccounts, loadArchivedAccounts, loadAssetPriceHistories, loadAssetPriceHistory, loadAssetTrades, loadBackup, loadDashboard, loadDcaActivity, loadPushPublicKey, loadSyncEvents, loadTransactions, loadValueHistory, removeAllocationTarget, removePriceAlert, removePushSubscription, removeWatchlistAsset, restoreAccount, saveAllocationTarget, saveCryptoTransferCostBasis, savePushSubscription, testPushDelivery } from './api'
+import type { Account, AllocationTarget, Dashboard, Holding, PnlAsset, PnlSummary as PnlSummaryData, Portfolio, PriceAlert, PriceHistoryPoint, PushNotificationPreferences, SyncEvent, SyncStatus, TradeMarker, Transaction, ValueHistoryPoint, WatchlistAsset } from './api'
 import type { DcaActivity, DcaBuy } from '@moondi/shared'
 import { DcaActivityPanel } from './dca-activity'
 import { NotificationCenter, type NotificationItem } from './notification-center'
@@ -1543,18 +1543,21 @@ const hasAnyInvestedValueHistory = (points: ValueHistoryPoint[]): boolean => poi
 const hasSelectedPnlValueHistory = (points: ValueHistoryPoint[]): boolean => hasInvestedValueHistory(points) && points.every((point) => point.selected_value !== null && Number.isFinite(point.selected_value))
 const selectedPnlHistory = (points: ValueHistoryPoint[]): ValueHistoryPoint[] => points.map((point) => ({ ...point, total_value: point.selected_value ?? point.total_value }))
 
-const chartTimeBounds = (points: ValueHistoryPoint[], buys: readonly DcaBuy[] = []) => {
+const tradeSideLabel = (side: TradeMarker['side'], language: Language): string => side === 'buy' ? (language === 'th' ? 'ซื้อ' : 'Buy') : (language === 'th' ? 'ขาย' : 'Sell')
+
+const chartTimeBounds = (points: ValueHistoryPoint[], events: readonly { executedAt: number }[] = []) => {
   const bounds = { from: points[0]?.snapshot_at ?? 0, to: points.at(-1)?.snapshot_at ?? 0 }
-  for (const buy of buys) {
-    bounds.from = Math.min(bounds.from, buy.executedAt)
-    bounds.to = Math.max(bounds.to, buy.executedAt)
+  for (const event of events) {
+    bounds.from = Math.min(bounds.from, event.executedAt)
+    bounds.to = Math.max(bounds.to, event.executedAt)
   }
   return bounds
 }
 
-const ValueHistoryChart = ({ buys, chartLabel, compact = false, language, points, primaryLabel, secondaryLabel, showInvestedValue = false, valuesVisible }: { buys?: (DcaBuy & { price: number })[] | undefined; chartLabel?: string; compact?: boolean; language: Language; points: ValueHistoryPoint[]; primaryLabel?: string; secondaryLabel?: string; showInvestedValue?: boolean; valuesVisible: boolean }) => {
+const ValueHistoryChart = ({ buys, chartLabel, compact = false, language, points, primaryLabel, secondaryLabel, showInvestedValue = false, trades, valuesVisible }: { buys?: (DcaBuy & { price: number })[] | undefined; trades?: readonly TradeMarker[] | undefined; chartLabel?: string; compact?: boolean; language: Language; points: ValueHistoryPoint[]; primaryLabel?: string; secondaryLabel?: string; showInvestedValue?: boolean; valuesVisible: boolean }) => {
   const [selectedIndex, setSelectedIndex] = useState(() => Math.max(points.length - 1, 0))
   const [selectedBuyId, setSelectedBuyId] = useState<string | null>(null)
+  const [selectedTradeId, setSelectedTradeId] = useState<string | null>(null)
   const [pulseRevision, setPulseRevision] = useState(0)
   const fillId = useId()
   const plotRef = useRef<HTMLDivElement>(null)
@@ -1578,9 +1581,11 @@ const ValueHistoryChart = ({ buys, chartLabel, compact = false, language, points
   if (!hasPlot) return null
 
   const buyMarkers = valuesVisible ? buys ?? [] : []
-  const { from: firstTime, to: lastTime } = chartTimeBounds(points, buyMarkers)
+  const tradeMarkers = valuesVisible ? trades ?? [] : []
+  const { from: firstTime, to: lastTime } = chartTimeBounds(points, [...buyMarkers, ...tradeMarkers.map((trade) => ({ executedAt: trade.executed_at }))])
   const timed = lastTime > firstTime
   const selectedBuy = valuesVisible ? buyMarkers.find((buy) => buy.id === selectedBuyId) : undefined
+  const selectedTrade = valuesVisible ? tradeMarkers.find((trade) => trade.id === selectedTradeId) : undefined
   const pulsingBuy = selectedBuy ?? buyMarkers.reduce<DcaBuy | undefined>(
     (latest, buy) => !latest || buy.executedAt > latest.executedAt ? buy : latest, undefined,
   )
@@ -1589,6 +1594,7 @@ const ValueHistoryChart = ({ buys, chartLabel, compact = false, language, points
     ? points.flatMap((point) => point.invested_value === null ? [point.total_value] : [point.total_value, point.invested_value])
     : points.map((point) => point.total_value)
   chartValues.push(...buyMarkers.map((buy) => buy.price))
+  chartValues.push(...tradeMarkers.map((trade) => trade.price))
   const minimum = Math.min(...chartValues)
   const maximum = Math.max(...chartValues)
   const rawRange = maximum - minimum
@@ -1651,6 +1657,7 @@ const ValueHistoryChart = ({ buys, chartLabel, compact = false, language, points
             if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
             event.preventDefault()
             setSelectedBuyId(null)
+            setSelectedTradeId(null)
             setSelectedIndex((index) => {
               if (event.key === 'Home') return 0
               if (event.key === 'End') return points.length - 1
@@ -1660,11 +1667,13 @@ const ValueHistoryChart = ({ buys, chartLabel, compact = false, language, points
           onPointerDown={(event) => {
             if (!valuesVisible) return
             setSelectedBuyId(null)
+            setSelectedTradeId(null)
             setPulseRevision((revision) => revision + 1)
             selectPoint(event.clientX, event.currentTarget)
           }}
           onPointerMove={(event) => {
             if (selectedBuyId !== null) setSelectedBuyId(null)
+            if (selectedTradeId !== null) setSelectedTradeId(null)
             selectPoint(event.clientX, event.currentTarget)
           }}
           preserveAspectRatio="none"
@@ -1687,9 +1696,9 @@ const ValueHistoryChart = ({ buys, chartLabel, compact = false, language, points
           </>}
           <polyline className="history-line" fill="none" points={line} vectorEffect="non-scaling-stroke" />
           {hasInvestedValue ? <path className="history-invested-value-line" d={investedValueLine} fill="none" vectorEffect="non-scaling-stroke" /> : null}
-          {selectedBuy ? null : <line className="history-selected-line" x1={selectedCoordinate.x} x2={selectedCoordinate.x} y1="8" y2="92" vectorEffect="non-scaling-stroke" />}
+          {selectedBuy || selectedTrade ? null : <line className="history-selected-line" x1={selectedCoordinate.x} x2={selectedCoordinate.x} y1="8" y2="92" vectorEffect="non-scaling-stroke" />}
         </svg>
-        {valuesVisible && !selectedBuy ? <span aria-hidden="true" className="chart-point" key={`${activeIndex}:${selected.snapshot_at}:${pulseRevision}`} style={{ left: `${selectedCoordinate.x}%`, top: `${selectedCoordinate.y}%` }} /> : null}
+        {valuesVisible && !selectedBuy && !selectedTrade ? <span aria-hidden="true" className="chart-point" key={`${activeIndex}:${selected.snapshot_at}:${pulseRevision}`} style={{ left: `${selectedCoordinate.x}%`, top: `${selectedCoordinate.y}%` }} /> : null}
         {valuesVisible ? buyMarkers.map((buy) => {
           const label = `${buy.reason ?? (language === 'th' ? 'ซื้อผ่านบอท' : 'Bot buy')} · ${dates.format(buy.executedAt)} · ${money.format(buy.price)}`
           return <button
@@ -1704,9 +1713,29 @@ const ValueHistoryChart = ({ buys, chartLabel, compact = false, language, points
             type="button"
           />
         }) : null}
+        {valuesVisible ? tradeMarkers.map((trade) => {
+          const label = `${tradeSideLabel(trade.side, language)} ${quantity.format(trade.amount)} · ${dates.format(trade.executed_at)} · ${money.format(trade.price)}`
+          return <button
+            aria-label={label}
+            aria-pressed={trade.id === selectedTradeId}
+            className="trade-chart-marker"
+            data-side={trade.side}
+            key={trade.id}
+            onClick={() => {
+              setSelectedBuyId(null)
+              setSelectedTradeId((id) => id === trade.id ? null : trade.id)
+            }}
+            style={{ left: `${timeX(trade.executed_at)}%`, top: `${priceY(trade.price)}%` }}
+            title={label}
+            type="button"
+          />
+        }) : null}
       </div>
       <div aria-live={valuesVisible ? 'polite' : 'off'} className="history-tooltip">
-        {selectedBuy ? <>
+        {selectedTrade ? <>
+          <span className="history-tooltip-value"><i className={`history-legend-swatch trade-swatch ${selectedTrade.side}`} />{tradeSideLabel(selectedTrade.side, language)} <strong>{quantity.format(selectedTrade.amount)}</strong> @ <strong>{money.format(selectedTrade.price)}</strong></span>
+          <span>{dates.format(selectedTrade.executed_at)}</span>
+        </> : selectedBuy ? <>
           <span className="history-tooltip-value"><i className="history-legend-swatch dca-buy-swatch" />{selectedBuy.reason ?? (language === 'th' ? 'ซื้อผ่านบอท' : 'Bot buy')} <strong>{money.format(selectedBuy.price)}</strong></span>
           <span>{dates.format(selectedBuy.executedAt)}</span>
         </> : <>
@@ -1773,6 +1802,7 @@ const AssetPriceTrend = ({ accountId, asset, averageCost, language, valuesVisibl
   const [range, setRange] = useState<PriceHistoryRange>('7d')
   const [priceFeed, setPriceFeed] = useState<{ key: string; points: PriceHistoryPoint[]; unavailable: boolean }>()
   const [botFeed, setBotFeed] = useState<{ key: string; activity: DcaActivity | null; unavailable: boolean }>()
+  const [tradeFeed, setTradeFeed] = useState<{ key: string; trades: TradeMarker[] }>()
   const requestedHistory = useMemo(() => priceHistoryRequest(range), [range, asset, accountId])
   const hasVerifiedAverageCost = averageCost !== null && Number.isFinite(averageCost) && averageCost > 0
   const botFeedKey = JSON.stringify([asset, accountId, range, requestedHistory.from])
@@ -1808,6 +1838,18 @@ const AssetPriceTrend = ({ accountId, asset, averageCost, language, valuesVisibl
     return () => { active = false }
   }, [accountId, asset, botFeedKey, requestedHistory])
 
+  useEffect(() => {
+    let active = true
+    void loadAssetTrades(asset, requestedHistory.from, accountId)
+      .then((trades) => {
+        if (active) setTradeFeed({ key: botFeedKey, trades })
+      })
+      .catch(() => {
+        if (active) setTradeFeed({ key: botFeedKey, trades: [] })
+      })
+    return () => { active = false }
+  }, [accountId, asset, botFeedKey, requestedHistory])
+
   const valuePoints = points.map((point) => ({ invested_value: point.average_cost ?? null, selected_value: null, snapshot_at: point.snapshot_at, total_value: point.price }))
   const hasHistoricalAverageCost = hasVerifiedAverageCost && valuePoints.filter((point) => point.invested_value !== null).length >= 2
   const stats = valuePoints.length > 0 ? historyStats(valuePoints) : null
@@ -1818,7 +1860,13 @@ const AssetPriceTrend = ({ accountId, asset, averageCost, language, valuesVisibl
   const selectedRange = priceHistoryRanges.find((option) => option.id === range)!
   const requestedFrom = requestedHistory.from || undefined
   const plottedBuys = valuesVisible ? activity?.buys.filter((buy): buy is DcaBuy & { price: number } => buy.price !== null && buy.price > 0 && buy.executedAt >= requestedHistory.from) : undefined
-  const chartBounds = chartTimeBounds(valuePoints, plottedBuys)
+  const botBuyTimes = activity?.buys.map((buy) => buy.executedAt) ?? []
+  const plottedTrades = valuesVisible && tradeFeed?.key === botFeedKey
+    ? tradeFeed.trades.filter((trade) => trade.price > 0 && trade.executed_at >= requestedHistory.from
+      && !(trade.side === 'buy' && botBuyTimes.some((time) => Math.abs(time - trade.executed_at) < 10 * 60 * 1_000)))
+    : []
+  const chartBounds = chartTimeBounds(valuePoints, [...(plottedBuys ?? []), ...plottedTrades.map((trade) => ({ executedAt: trade.executed_at }))])
+  const hasBotBuysBeforeSnapshots = first !== undefined && chartTimeBounds(valuePoints, plottedBuys).from < first.snapshot_at
   const hasBuysBeforeSnapshots = first !== undefined && chartBounds.from < first.snapshot_at
   const historyIsShorterThanRange = first !== undefined && requestedFrom !== undefined && first.snapshot_at > requestedFrom + 60 * 60 * 1_000
 
@@ -1848,9 +1896,11 @@ const AssetPriceTrend = ({ accountId, asset, averageCost, language, valuesVisibl
           <div className="history-legend" aria-label={language === 'th' ? 'คำอธิบายเส้นกราฟ' : 'Chart legend'}>
             <span><i className="history-legend-swatch portfolio-value" />{language === 'th' ? 'ราคา ณ snapshot' : 'Snapshot price'}</span>
             {hasHistoricalAverageCost ? <span><i className="history-legend-swatch invested-value" />{language === 'th' ? 'ต้นทุนเฉลี่ยย้อนหลัง' : 'Historical average cost'}</span> : null}
+            {plottedTrades.some((trade) => trade.side === 'buy') ? <span><i className="history-legend-swatch trade-swatch buy" />{tradeSideLabel('buy', language)}</span> : null}
+            {plottedTrades.some((trade) => trade.side === 'sell') ? <span><i className="history-legend-swatch trade-swatch sell" />{tradeSideLabel('sell', language)}</span> : null}
             {plottedBuys?.length ? <span><i className="history-legend-swatch dca-buy-swatch" />{language === 'th' ? 'ราคาซื้อที่บอทรายงาน' : 'Bot-reported buy price'}</span> : null}
           </div>
-          <ValueHistoryChart buys={plottedBuys} chartLabel={language === 'th' ? `กราฟราคา ${asset} เทียบเงินบาท เลื่อนหรือแตะเพื่อดูข้อมูลแต่ละจุด` : `${asset} price in Thai baht. Hover or tap to inspect each point.`} language={language} points={valuePoints} primaryLabel={language === 'th' ? 'ราคา ณ snapshot' : 'Snapshot price'} secondaryLabel={language === 'th' ? 'ต้นทุนเฉลี่ยย้อนหลัง' : 'Historical average cost'} showInvestedValue={hasHistoricalAverageCost} valuesVisible={valuesVisible} />
+          <ValueHistoryChart buys={plottedBuys} trades={plottedTrades} chartLabel={language === 'th' ? `กราฟราคา ${asset} เทียบเงินบาท เลื่อนหรือแตะเพื่อดูข้อมูลแต่ละจุด` : `${asset} price in Thai baht. Hover or tap to inspect each point.`} language={language} points={valuePoints} primaryLabel={language === 'th' ? 'ราคา ณ snapshot' : 'Snapshot price'} secondaryLabel={language === 'th' ? 'ต้นทุนเฉลี่ยย้อนหลัง' : 'Historical average cost'} showInvestedValue={hasHistoricalAverageCost} valuesVisible={valuesVisible} />
           <div className="history-range">
             <span>{dateTime(language).format(chartBounds.from)}</span>
             <span>{selectedRange ? `${priceRangeLabel(selectedRange.id, language)} · ${valuePoints.length} ${language === 'th' ? 'จุดข้อมูล' : 'points'}` : null}</span>
@@ -1859,7 +1909,7 @@ const AssetPriceTrend = ({ accountId, asset, averageCost, language, valuesVisibl
           {hasBuysBeforeSnapshots || historyIsShorterThanRange ? (
             <p className="asset-price-availability">
               {language === 'th' ? `เริ่มบันทึกราคา ${dateTime(language).format(first.snapshot_at)}` : `Price snapshots start on ${dateTime(language).format(first.snapshot_at)}`}
-              {hasBuysBeforeSnapshots ? (language === 'th' ? ' · ก่อนหน้านั้นมีเฉพาะราคาซื้อที่บอทรายงาน' : ' · Earlier points are bot-reported buys') : null}
+              {hasBuysBeforeSnapshots ? (hasBotBuysBeforeSnapshots ? (language === 'th' ? ' · ก่อนหน้านั้นมีเฉพาะราคาซื้อที่บอทรายงาน' : ' · Earlier points are bot-reported buys') : (language === 'th' ? ' · ก่อนหน้านั้นมีเฉพาะรายการซื้อขายของคุณ' : ' · Earlier points are your trades')) : null}
             </p>
           ) : null}
           {hasVerifiedAverageCost && !hasHistoricalAverageCost ? <p className="asset-price-availability">{language === 'th' ? 'ต้นทุนเฉลี่ยย้อนหลังตรวจสอบไม่ครบสำหรับช่วงราคานี้ จึงไม่แสดงเส้นอ้างอิง' : 'Historical average cost is not verifiable for this entire price range, so no reference line is shown.'}</p> : null}
@@ -2005,7 +2055,7 @@ const HistoryView = ({ accountId, initialPoints, investedAssets, language, onBac
           <p>{hasInvestedValue ? (language === 'th' ? 'เทียบมูลค่าปัจจุบันกับต้นทุนเฉลี่ยของสินทรัพย์ที่เลือกใน P&L ณ เวลา snapshot' : 'Compare selected assets’ current value and average-cost basis at each snapshot.') : (language === 'th' ? 'มูลค่ารวมทุกสินทรัพย์ในพอร์ต ณ เวลา snapshot' : 'Total value of every portfolio asset at each snapshot.')}</p>
         </div>
         <div className="history-page-actions">
-          <button className="back-link history-back" onClick={onBack} type="button">← {language === 'th' ? 'กลับไปภาพรวม' : 'Back to overview'}</button>
+          <button className="back-link history-back tab-page-back" onClick={onBack} type="button">← {language === 'th' ? 'กลับไปภาพรวม' : 'Back to overview'}</button>
           <div className="range-tabs" aria-label={language === 'th' ? 'ช่วงเวลาของกราฟ' : 'Chart range'}>
             {historyRanges.map((option) => (
               <button aria-pressed={range === option.days} className={range === option.days ? 'range-tab active' : 'range-tab'} key={option.days} onClick={() => setRange(option.days)} type="button">
@@ -2518,7 +2568,7 @@ const SyncActivity = ({ accountId, language, onBack }: { accountId?: string | un
 
   return (
     <section className="sync-activity" aria-label={language === 'th' ? 'กิจกรรมการซิงก์' : 'Sync activity'}>
-      <button className="back-link" onClick={onBack} type="button">← {language === 'th' ? 'กลับไปภาพรวม' : 'Back to overview'}</button>
+      <button className="back-link tab-page-back" onClick={onBack} type="button">← {language === 'th' ? 'กลับไปภาพรวม' : 'Back to overview'}</button>
       <div className="sync-activity-heading">
         <div>
           <h1>{language === 'th' ? 'กิจกรรมการซิงก์' : 'Sync activity'}</h1>

@@ -211,6 +211,11 @@ export const loadDcaActivity = async (asset: string, from: number, accountId?: s
   return activity
 }
 
+export type TradeMarker = { amount: number; executed_at: number; id: string; price: number; side: 'buy' | 'sell' }
+
+export const loadAssetTrades = async (asset: string, from: number, accountId?: string): Promise<TradeMarker[]> =>
+  (await request<{ trades: TradeMarker[] }>(`/api/history/trades/${encodeURIComponent(asset)}?from=${from}${scopedQuery(accountId)}`)).trades
+
 export const loadAccounts = async (): Promise<Account[]> => (await request<{ accounts: Account[] }>('/api/accounts')).accounts
 
 export const loadArchivedAccounts = async (): Promise<Account[]> => (await request<{ accounts: Account[] }>('/api/accounts/archived')).accounts

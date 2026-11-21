@@ -1124,6 +1124,48 @@ describe('API worker', () => {
     expect(prepare).not.toHaveBeenCalled()
   })
 
+  it('returns THB-quoted buy and sell markers for one asset in time order', async () => {
+    const all = vi.fn().mockResolvedValue({ results: [
+      { amount: 0.4, executed_at: 1_780_000_200_000, id: 'sell-1', price: 2_600_000, side: 'sell' },
+      { amount: 0.5, executed_at: 1_780_000_100_000, id: 'buy-1', price: 2_500_000, side: 'buy' },
+    ] })
+    const bind = vi.fn().mockReturnValue({ all })
+    const prepare = vi.fn().mockReturnValue({ bind })
+    const response = await app.request(
+      '/api/history/trades/btc?from=1780000000000&to=1780000300000&account=main',
+      undefined,
+      { CACHE: {} as KVNamespace, DB: { prepare } as unknown as D1Database },
+    )
+
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toEqual({
+      asset: 'BTC',
+      trades: [
+        { amount: 0.5, executed_at: 1_780_000_100_000, id: 'buy-1', price: 2_500_000, side: 'buy' },
+        { amount: 0.4, executed_at: 1_780_000_200_000, id: 'sell-1', price: 2_600_000, side: 'sell' },
+      ],
+    })
+    const query = String(prepare.mock.calls[0]?.[0])
+    expect(query).toContain('trades.base_asset = ?')
+    expect(query).toContain("trades.quote_asset = 'THB'")
+    expect(query).toContain('accounts.archived_at IS NULL')
+    expect(query).toContain('trades.account_id = ?')
+    expect(bind).toHaveBeenCalledWith('BTC', 1_780_000_000_000, 1_780_000_300_000, 'main', 1000)
+  })
+
+  it('rejects an invalid asset for trade markers without querying the database', async () => {
+    const prepare = vi.fn()
+    const response = await app.request(
+      '/api/history/trades/bad%20asset',
+      undefined,
+      { CACHE: {} as KVNamespace, DB: { prepare } as unknown as D1Database },
+    )
+
+    expect(response.status).toBe(400)
+    await expect(response.json()).resolves.toEqual({ error: 'Invalid asset' })
+    expect(prepare).not.toHaveBeenCalled()
+  })
+
   it('returns multiple price histories in one request for holding sparklines', async () => {
     const all = vi.fn().mockResolvedValue({ results: [
       { asset: 'BTC', price: 2500000, snapshot_at: 1_780_000_000_000 },

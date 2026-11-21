@@ -97,6 +97,15 @@ Holding rows display a small chart from stored price snapshots. It measures
 market-price movement, not a change in the amount held. The label says
 `Collecting prices` until at least two snapshots exist.
 
+### Trade markers on the asset price chart
+
+The price chart on an asset's detail page marks your own synchronized
+THB-quoted buys (green up triangle) and sells (red down triangle) at their
+recorded execution price and time. Selecting a marker shows its side, quantity,
+price, and time. Markers come only from trade history already stored in D1, are
+scoped to the selected account, and are hidden while values are concealed. They
+describe what was recorded; they are not a P&L result.
+
 ### Activity and notifications
 
 The AWS secure-sync path has verified the required Bitkub history endpoints and

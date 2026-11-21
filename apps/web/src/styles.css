@@ -4606,6 +4606,56 @@ input[type='number']::-webkit-outer-spin-button {
   }
 }
 
+.trade-chart-marker {
+  background: transparent;
+  border: 0;
+  border-radius: 50%;
+  cursor: pointer;
+  display: grid;
+  height: 28px;
+  justify-items: center;
+  padding: 0;
+  position: absolute;
+  transform: translate(-50%, -50%);
+  width: 28px;
+}
+
+.trade-chart-marker::before,
+.history-legend-swatch.trade-swatch {
+  content: '';
+  filter: drop-shadow(0 0 1px var(--surface));
+  height: 10px;
+  width: 11px;
+}
+
+.trade-chart-marker::before {
+  align-self: center;
+}
+
+.trade-chart-marker[data-side='buy']::before,
+.history-legend-swatch.trade-swatch.buy {
+  background: var(--positive);
+  clip-path: polygon(50% 0, 100% 100%, 0 100%);
+}
+
+.trade-chart-marker[data-side='sell']::before,
+.history-legend-swatch.trade-swatch.sell {
+  background: var(--negative);
+  clip-path: polygon(0 0, 100% 0, 50% 100%);
+}
+
+.trade-chart-marker[aria-pressed='true'],
+.trade-chart-marker:focus-visible {
+  outline: 2px solid var(--ink);
+  z-index: 1;
+}
+
+@media (max-width: 1023px) {
+  .tab-page-back {
+    display: none;
+  }
+}
+
 @media (display-mode: standalone) and (max-width: 1023px) {
   .app-topbar {
     padding-block: calc(24px + var(--app-safe-top)) 16px;
