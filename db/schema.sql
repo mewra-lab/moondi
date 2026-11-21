@@ -258,3 +258,12 @@ CREATE TABLE IF NOT EXISTS dca_bot_signals (
   has_error INTEGER NOT NULL CHECK (has_error IN (0, 1)),
   PRIMARY KEY (account_id, asset)
 );
+
+CREATE INDEX IF NOT EXISTS sync_events_recent_idx
+  ON sync_events(occurred_at DESC, id DESC);
+
+CREATE INDEX IF NOT EXISTS sync_events_account_recent_idx
+  ON sync_events(account_id, occurred_at DESC, id DESC);
+
+CREATE INDEX IF NOT EXISTS portfolio_asset_value_snapshots_account_interval_idx
+  ON portfolio_asset_value_snapshots(account_id, interval);

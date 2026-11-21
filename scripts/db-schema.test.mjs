@@ -201,3 +201,55 @@ test('overlap migration removes only archive records that have a live twin', () 
   assert.deepEqual(ids('fiat_transfers'), ['fiat-archive-unique', 'fiat-live-twin'])
   assert.deepEqual(ids('trades'), ['trade-archive-different-side', 'trade-archive-pair-a', 'trade-archive-pair-b', 'trade-live-twin'])
 })
+
+const migrationSql = (name) => readFileSync(`${repositoryRoot}db/migrations/${name}`, 'utf8')
+const migrationNamesBefore = (limit) => readdirSync(`${repositoryRoot}db/migrations`)
+  .filter((name) => name.endsWith('.sql') && name < limit)
+  .toSorted()
+
+test('index migration only adds indexes and leaves every stored row untouched', () => {
+  const name = '0022_reduce_hot_query_scans.sql'
+  const statements = migrationSql(name).split(';').map((statement) => statement.replace(/--.*$/gm, '').trim()).filter(Boolean)
+  assert.ok(statements.length > 0)
+  for (const statement of statements) assert.match(statement, /^CREATE INDEX IF NOT EXISTS \w+\s+ON \w+\(/)
+
+  const database = buildDatabase(migrationNamesBefore(name).map(migrationSql))
+  database.prepare('INSERT INTO accounts (id, exchange, label, owner_email, created_at) VALUES (?, ?, ?, ?, ?)')
+    .run('bitkub-main', 'bitkub', 'Bitkub Main', 'owner@example.test', 1)
+  for (let index = 0; index < 40; index += 1) {
+    database.prepare('INSERT INTO sync_events (account_id, data_type, status, detail, occurred_at) VALUES (?, ?, ?, ?, ?)')
+      .run('bitkub-main', index % 2 === 0 ? 'balances' : 'trades', 'success', `event ${index}`, 1_000 + index)
+    database.prepare('INSERT INTO portfolio_asset_value_snapshots (account_id, asset, interval, snapshot_at, quantity, value) VALUES (?, ?, ?, ?, ?, ?)')
+      .run('bitkub-main', index % 2 === 0 ? 'BTC' : 'SOL', 100 + Math.floor(index / 2), 1_000 + index, 1 + index, 10 + index)
+  }
+  const tables = database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all().map(({ name: table }) => table)
+  const snapshot = () => Object.fromEntries(tables.map((table) => [table, database.prepare(`SELECT * FROM "${table}" ORDER BY rowid`).all().map((row) => ({ ...row }))]))
+  const before = snapshot()
+
+  database.exec(migrationSql(name))
+
+  assert.deepEqual(snapshot(), before)
+  assert.ok(Object.values(before).some((rows) => rows.length >= 40))
+})
+
+test('the busiest dashboard queries read through indexes instead of scanning or sorting whole tables', () => {
+  const migrationsDirectory = `${repositoryRoot}db/migrations`
+  const database = buildDatabase(readdirSync(migrationsDirectory).filter((name) => name.endsWith('.sql')).toSorted().map(migrationSql))
+  const plan = (sql) => database.prepare(`EXPLAIN QUERY PLAN ${sql}`).all().map((row) => row.detail)
+
+  const allAccounts = plan(`
+    SELECT sync_events.id FROM sync_events JOIN accounts ON accounts.id = sync_events.account_id
+    WHERE accounts.archived_at IS NULL ORDER BY sync_events.occurred_at DESC, sync_events.id DESC LIMIT 100
+  `)
+  assert.ok(!allAccounts.some((detail) => /TEMP B-TREE/.test(detail)), allAccounts.join(' | '))
+  assert.ok(allAccounts.some((detail) => /sync_events_recent_idx/.test(detail)), allAccounts.join(' | '))
+
+  const oneAccount = plan(`
+    SELECT sync_events.id FROM sync_events JOIN accounts ON accounts.id = sync_events.account_id
+    WHERE accounts.archived_at IS NULL AND sync_events.account_id = 'a' ORDER BY sync_events.occurred_at DESC, sync_events.id DESC LIMIT 100
+  `)
+  assert.ok(!oneAccount.some((detail) => /TEMP B-TREE/.test(detail)), oneAccount.join(' | '))
+
+  const replace = plan("DELETE FROM portfolio_asset_value_snapshots WHERE account_id = 'a' AND interval = 1")
+  assert.ok(replace.some((detail) => /account_id=\? AND interval=\?/.test(detail)), replace.join(' | '))
+})
