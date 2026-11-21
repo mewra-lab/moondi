@@ -3,6 +3,8 @@ import { cors } from 'hono/cors'
 import { createFactory } from 'hono/factory'
 import { calculateAverageCostHistory, calculateAverageCostPnl, calculateOpenCostBasisHistory, portfolioAssetValuesAt, type PnlResult, type PriceQuote } from '@moondi/shared'
 import { createAwsBitkubRoutes } from './aws-bitkub-routes'
+import { createAwsDcaRoutes } from './aws-dca-routes'
+import { parseDcaIngestion, parseDcaStateRequest, type DcaIngestionBuy } from './dca-ingestion'
 import { createDcaRoutes } from './dca-routes'
 
 type HonoEnv = {
@@ -1126,6 +1128,101 @@ const ingestAwsHistory = async (c: Context<HonoEnv>) => {
   return c.json({ complete: payload.complete, dataType: payload.dataType, ingested: true, recordCount: payload.records.length, syncAt: payload.syncAt })
 }
 
+const dcaPushWindowMs = 24 * 60 * 60 * 1_000
+const maxDcaPushBuys = 3
+
+const notifyAwsDca = async (env: Env, token: string, buys: DcaIngestionBuy[], total: number) => {
+  try {
+    const response = await env.SYNC.fetch('https://moondi.internal/internal/push/dca', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-moond-internal-token': token },
+      body: JSON.stringify({
+        buys: buys.map(({ amount, asset, id, reason, thbAmount }) => ({ amount, asset, id, reason, thbAmount })),
+        total,
+      }),
+    })
+    await response.body?.cancel()
+    if (!response.ok) console.warn(JSON.stringify({ message: 'AWS DCA push rejected', status: response.status }))
+  } catch {
+    console.warn(JSON.stringify({ message: 'AWS DCA push unavailable' }))
+  }
+}
+
+const getAwsDcaState = async (c: Context<HonoEnv>) => {
+  const authenticated = await authenticatedAwsIngestion(c)
+  if (authenticated instanceof Response) return authenticated
+  let parsedBody: unknown
+  try {
+    parsedBody = JSON.parse(authenticated.body) as unknown
+  } catch {
+    return c.json({ error: 'Invalid ingestion payload' }, 400)
+  }
+  const request = parseDcaStateRequest(parsedBody)
+  if (!request) return c.json({ error: 'Invalid ingestion payload' }, 400)
+  if (!await getActiveBitkubAccount(c.env.DB, request.accountId)) return c.json({ error: 'Not found' }, 404)
+  if (!await claimAwsIngestionNonce(c.env.DB, authenticated.nonce, authenticated.timestamp)) return c.json({ error: 'Replay rejected' }, 409)
+
+  const latest = await c.env.DB.prepare('SELECT MAX(executed_at) AS latest_buy_at FROM dca_bot_buys WHERE account_id = ?')
+    .bind(request.accountId)
+    .first<{ latest_buy_at: number | null }>()
+  return c.json({ latestBuyAt: latest?.latest_buy_at ?? null })
+}
+
+const ingestAwsDca = async (c: Context<HonoEnv>) => {
+  const authenticated = await authenticatedAwsIngestion(c)
+  if (authenticated instanceof Response) return authenticated
+  let parsedBody: unknown
+  try {
+    parsedBody = JSON.parse(authenticated.body) as unknown
+  } catch {
+    return c.json({ error: 'Invalid ingestion payload' }, 400)
+  }
+  const payload = parseDcaIngestion(parsedBody, authenticated.timestamp)
+  if (!payload) return c.json({ error: 'Invalid ingestion payload' }, 400)
+  if (!await getActiveBitkubAccount(c.env.DB, payload.accountId)) return c.json({ error: 'Not found' }, 404)
+  if (!await claimAwsIngestionNonce(c.env.DB, authenticated.nonce, authenticated.timestamp)) return c.json({ error: 'Replay rejected' }, 409)
+
+  const results = await c.env.DB.batch([
+    ...payload.buys.flatMap((buy) => [
+      c.env.DB.prepare(`
+        INSERT INTO dca_bot_buys (account_id, id, asset, executed_at, amount, price, thb_amount, fee, reason)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(account_id, id) DO NOTHING
+      `).bind(payload.accountId, buy.id, buy.asset, buy.executedAt, buy.amount, buy.price, buy.thbAmount, buy.fee, buy.reason),
+      c.env.DB.prepare(`
+        UPDATE dca_bot_buys SET amount = ?, price = ?, thb_amount = ?, fee = ?, reason = ?
+        WHERE account_id = ? AND id = ?
+          AND (amount IS NOT ? OR price IS NOT ? OR thb_amount IS NOT ? OR fee IS NOT ? OR reason IS NOT ?)
+      `).bind(buy.amount, buy.price, buy.thbAmount, buy.fee, buy.reason, payload.accountId, buy.id, buy.amount, buy.price, buy.thbAmount, buy.fee, buy.reason),
+    ]),
+    ...payload.signals.map((signal) => c.env.DB.prepare(`
+      INSERT INTO dca_bot_signals (account_id, asset, last_seen_at, active, levels_json, has_error)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(account_id, asset) DO UPDATE SET
+        last_seen_at = excluded.last_seen_at,
+        active = excluded.active,
+        levels_json = excluded.levels_json,
+        has_error = excluded.has_error
+      WHERE excluded.last_seen_at >= dca_bot_signals.last_seen_at
+    `).bind(payload.accountId, signal.asset, signal.lastSeenAt, signal.active === null ? null : Number(signal.active), JSON.stringify(signal.levels), Number(signal.hasError))),
+    ...(payload.signals.length === 0 ? [] : [
+      c.env.DB.prepare('DELETE FROM dca_bot_signals WHERE account_id = ? AND last_seen_at < ?')
+        .bind(payload.accountId, Math.max(...payload.signals.map((signal) => signal.lastSeenAt))),
+    ]),
+  ])
+
+  const pushToken = readString(c.env, 'INTERNAL_PUSH_TEST_TOKEN')
+  if (pushToken) {
+    const recentNewBuys = payload.buys
+      .filter((buy, index) => results[index * 2]?.meta.changes === 1 && buy.executedAt >= authenticated.timestamp - dcaPushWindowMs)
+      .sort((left, right) => right.executedAt - left.executedAt)
+    if (recentNewBuys.length > 0) {
+      c.executionCtx.waitUntil(notifyAwsDca(c.env, pushToken, recentNewBuys.slice(0, maxDcaPushBuys), recentNewBuys.length))
+    }
+  }
+  return c.json({ buyCount: payload.buys.length, ingested: true, signalCount: payload.signals.length, syncAt: payload.syncAt })
+}
+
 const normalizeAssets = (value: string | undefined): string[] => {
   if (!value) return []
   const assets = value.split(',').map(normalizeAsset)
@@ -1443,16 +1540,7 @@ const pushTestKey = async (endpoint: string): Promise<string> => {
   return `push-test:${Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')}`
 }
 
-const dcaRoutes = createDcaRoutes({
-  getAccounts: async ({ DB }) => (await DB.prepare(
-    "SELECT id, archived_at FROM accounts WHERE exchange = 'bitkub'",
-  ).all<{ id: string; archived_at: number | null }>()).results,
-  getSettings: (env) => ({
-    accountId: readString(env, 'DCA_BOT_ACCOUNT_ID'),
-    token: readString(env, 'DCA_READER_TOKEN'),
-    url: readString(env, 'DCA_READER_URL'),
-  }),
-})
+const dcaRoutes = createDcaRoutes()
 
 const api = factory
   .createApp()
@@ -1780,6 +1868,11 @@ const awsBitkubRoutes = createAwsBitkubRoutes({
   state: getAwsSyncState,
 })
 
+const awsDcaRoutes = createAwsDcaRoutes({
+  activity: ingestAwsDca,
+  state: getAwsDcaState,
+})
+
 const app = factory
   .createApp()
   .use('*', async (c, next) => {
@@ -1793,6 +1886,7 @@ const app = factory
   })
   .get('/health', (c) => c.json({ status: 'ok' }))
   .route('/internal/aws-sync/bitkub', awsBitkubRoutes)
+  .route('/internal/aws-sync/dca', awsDcaRoutes)
   .route('/api', api)
   .notFound((c) => c.json({ error: 'Not found' }, 404))
   .onError((error, c) => {

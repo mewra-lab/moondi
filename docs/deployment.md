@@ -232,6 +232,59 @@ After the manual Lambda test and one scheduled run both succeed, set
 Do not switch this mode before Lambda ingestion is verified: otherwise no
 component will be responsible for new private balance snapshots.
 
+## Optional: DCA bot feed
+
+Skip this if you do not run the DCA bot. The asset page then simply shows no
+bot activity. The feed reuses the AWS ingestion path above: a scheduled Lambda
+reads the bot's MongoDB data and posts normalized records to
+`/internal/aws-sync/dca/*`, which require the same Cloudflare Access service
+token and the same HMAC, timestamp, and single-use nonce as the Bitkub sync. No
+public Lambda Function URL exists in this design.
+
+1. Apply every pending migration through `0021_dca_bot_activity.sql`, then deploy
+   the API Worker and the Sync Worker (new internal push route) before the Lambda.
+2. In MongoDB, create a dedicated user with the `read` role limited to
+   `devme_trading.Transaction` and `devme_trading.BotHeartbeat`. Allow the
+   Lambda's network access on the MongoDB side.
+3. In the AWS console (Systems Manager → Parameter Store), create the Standard
+   SecureString parameter `/moondi/aws-sync/dca/mongodb-uri` holding that user's
+   connection string. Do not use a command line that would put it in shell
+   history or process arguments.
+4. Create a new role (for example `moondi-dca-sync-role`) with
+   `AWSLambdaBasicExecutionRole` and an inline policy that allows `ssm:GetParameter`
+   on exactly `/moondi/aws-sync/dca/mongodb-uri`,
+   `/moondi/aws-sync/cloudflare/access-client-id`,
+   `/moondi/aws-sync/cloudflare/access-client-secret`, and
+   `/moondi/aws-sync/ingestion-secret`, plus `kms:Decrypt` on the parameters' key
+   restricted with `kms:ViaService = ssm.<region>.amazonaws.com` (as in the Bitkub
+   role above). Add nothing else: no D1, Cloudflare, IAM, or wildcard SSM access.
+5. Package `infra/aws-dca-sync/lambda_function.py` with the dependency from its
+   `requirements.txt` built for your runtime and architecture, and create a
+   separate function with handler `lambda_function.lambda_handler`, a 60-second
+   timeout, 256 MB memory, **no VPC and no function URL**, and reserved
+   concurrency `1`. Set these non-secret environment variables:
+
+   | Name | Value |
+   | --- | --- |
+   | `MONGODB_URI_PARAMETER` | `/moondi/aws-sync/dca/mongodb-uri` |
+   | `CF_ACCESS_CLIENT_ID_PARAMETER` | `/moondi/aws-sync/cloudflare/access-client-id` |
+   | `CF_ACCESS_CLIENT_SECRET_PARAMETER` | `/moondi/aws-sync/cloudflare/access-client-secret` |
+   | `AWS_INGESTION_SECRET_PARAMETER` | `/moondi/aws-sync/ingestion-secret` |
+   | `MOONDI_ACCOUNT_ID` | the active Moondi account the bot trades on |
+   | `MOONDI_API_ORIGIN` | `https://<your-api-host>` |
+
+6. Run one manual test with `{}`. It should return `{ "ok": true, … }` and log only
+   counts. A `401`, `403`, or `404` means the Access policy or ingestion secret is
+   wrong; do not weaken Access to diagnose it. Then create an EventBridge
+   Scheduler schedule (`rate(5 minutes)`, no flexible window, bounded retries).
+7. Remove any older DCA reader function, its Function URL and resource policy, and
+   delete the API Worker's obsolete `DCA_READER_URL`, `DCA_READER_TOKEN`, and
+   `DCA_BOT_ACCOUNT_ID` secrets if they exist.
+
+The first run backfills the bot's history (up to 5,000 buys per run, continuing on
+the next run) without sending notifications; only buys from the last 24 hours
+that are new to D1 notify.
+
 ## Deploy order
 
 Before building/deploying Pages, set `VITE_API_BASE_URL` in the Pages build

@@ -117,6 +117,24 @@ is calculated by the API from trade history already stored in D1. It excludes
 crypto transfers in or out, so it is a description of recorded buying, not the
 cost basis of the position you hold and not a P&L result.
 
+### DCA bot activity (optional)
+
+When the DCA bot feed is set up (see [the deployment guide](deployment.md#optional-dca-bot-feed)),
+the asset page lists the bot's recent buys with the reason it reported
+(`Signal`, `DCA`, or a Fibonacci level), the reported fill price, and the latest
+signal state, and plots reported fill prices on the price chart. The data is
+copied into D1 by a scheduled Lambda about every five minutes, so it can lag the
+bot by that long and is only as complete as the bot's own records. A buy without
+a reported fill price appears in the list only. This is the bot's own reporting;
+it is not read from Bitkub and is not used in P&L, which comes from Bitkub trade
+history.
+
+A bot buy executed within the last 24 hours that is new to Moondi sends one Web
+Push notification (reason, quantity, THB amount) to subscriptions with the
+**trades** preference enabled. Bitkub's own history sync can also announce the
+same purchase later as a generic new-trade notification, so one buy may notify
+twice.
+
 ### Activity and notifications
 
 The AWS secure-sync path has verified the required Bitkub history endpoints and

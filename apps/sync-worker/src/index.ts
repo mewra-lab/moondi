@@ -2,6 +2,7 @@ import { BitkubAdapter } from '@moondi/exchanges/bitkub'
 import type { NormalizedBalance, NormalizedFiatTransfer, NormalizedTrade, NormalizedTransfer, PriceQuote } from '@moondi/shared'
 import * as webpush from 'web-push'
 import type { PushSubscription as WebPushSubscription, RequestOptions as WebPushRequestOptions } from 'web-push'
+import { parseDcaPush } from './dca-push'
 import { credentialIssue, parseBitkubCredentialSource, resolveBitkubCredentials, scopedExchangeRecordId, type BitkubCredentials } from './account-credentials'
 import { savePortfolioValueSnapshot } from './portfolio-snapshots'
 import { balancesForSnapshot, historyFetchStart, mergeTradeAssets, pricesForPersistence, sharedHistoryCoverage } from './sync-selection'
@@ -642,6 +643,13 @@ export default {
       const summary = parseHistoryPush(await request.json().catch(() => null))
       if (!summary) return Response.json({ error: 'Invalid activity summary' }, { status: 400 })
       await sendPush(env, summary.category, summary.payload)
+      return new Response(null, { status: 204 })
+    }
+    if (request.method === 'POST' && url.pathname === '/internal/push/dca') {
+      if (!await hasInternalAccess(request, env)) return Response.json({ error: 'Not found' }, { status: 404 })
+      const summary = parseDcaPush(await request.json().catch(() => null))
+      if (!summary) return Response.json({ error: 'Invalid DCA summary' }, { status: 400 })
+      await Promise.all(summary.payloads.map((payload) => sendPush(env, summary.category, payload)))
       return new Response(null, { status: 204 })
     }
     if (request.method === 'POST' && url.pathname === '/internal/push/test') {

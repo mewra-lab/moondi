@@ -36,6 +36,9 @@ collects other people's exchange credentials.
                                       │ + HMAC, timestamp, nonce
                                       ▼
                             API Worker → D1 SQLite
+                                      ▲
+          EventBridge Scheduler → AWS Lambda → MongoDB (optional DCA bot feed,
+                                      same Access token + HMAC + nonce)
 ```
 
 ## Trust boundaries
@@ -44,7 +47,7 @@ collects other people's exchange credentials.
 | --- | --- | --- |
 | Browser → API | Normalized balances, prices, history, and activity | Bitkub API key/secret, raw exchange payloads |
 | Sync Worker → Bitkub | Signed read-only requests | Browser-originated trading instructions |
-| AWS Lambda → API ingestion | Bounded normalized records with a fresh HMAC, nonce, timestamp, and Cloudflare Access service token | Bitkub API key/secret, raw exchange response, browser traffic, arbitrary SQL |
+| AWS Lambda → API ingestion | Bounded normalized records with a fresh HMAC, nonce, timestamp, and Cloudflare Access service token | Bitkub API key/secret, MongoDB credentials, raw exchange or bot documents, browser traffic, arbitrary SQL |
 | Wrangler config → Cloudflare | Public binding names and resource IDs for that installation | Secret values |
 | D1 → UI | Fields needed by the selected private view | API secrets, VAPID private key, raw debugging JSON |
 
@@ -86,6 +89,12 @@ collects other people's exchange credentials.
    viewer. It stores only user-interface preferences locally.
 6. When enabled, the sync Worker sends a Web Push message to subscriptions
    stored in D1. Invalid or inactive subscriptions are removed/pruned.
+7. The optional DCA bot feed follows the same pattern: a scheduled Lambda reads
+   the bot's buys and signal state with a read-only MongoDB user and posts
+   validated fields to `/internal/aws-sync/dca/*`. The API stores them in D1
+   (`dca_bot_buys`, `dca_bot_signals`) and the asset page reads only D1. There is
+   no public endpoint for the bot's data, and no MongoDB connection is made on a
+   page load.
 
 ## Important invariants
 
