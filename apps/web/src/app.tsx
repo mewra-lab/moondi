@@ -123,7 +123,6 @@ const resolveOverviewSections = (): OverviewSections => {
 
 const resolveCostMethod = (): CostMethod => localStorage.getItem(costMethodStorageKey) === 'lots' ? 'lots' : 'average'
 
-// The P&L cost method is a per-browser preference; components that fetch cost-dependent data read it here.
 const CostMethodContext = createContext<CostMethod>('average')
 
 const resolveIgnoredPnlAssets = (): string[] => {

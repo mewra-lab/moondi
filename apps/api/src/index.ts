@@ -309,7 +309,6 @@ const getHoldings = async (db: D1Database, accountId?: string): Promise<HoldingR
   return result.results
 }
 
-// `?costMethod=` selects how the cost of sold or withdrawn coins is chosen; absent means the average-cost default.
 const parseCostMethod = (value: string | undefined): PnlCostMethod | undefined => (
   value === undefined || value === 'average' ? 'average' : value === 'lots' ? 'lots' : undefined
 )

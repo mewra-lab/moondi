@@ -17,8 +17,6 @@ const memoryKv = () => {
   } as unknown as KVNamespace
 }
 
-// One verified Bitkub account: an old lot (100 coins for 100 THB), a newer lot (100 coins for 10 THB bought on 5 Jan)
-// and the newer coins sent to a wallet the same day. Average cost leaves 55 THB, the lots method leaves the old 100 THB.
 const setup = () => {
   const { d1, database } = createSqliteD1()
   const now = Math.floor(Date.now() / 1_800_000) * 1_800_000
