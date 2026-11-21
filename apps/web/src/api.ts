@@ -241,6 +241,24 @@ export const restoreAccount = async (accountId: string): Promise<void> => {
   await request<{ ok: true }>(`/api/accounts/${encodeURIComponent(accountId)}/restore`, { method: 'POST' })
 }
 
+export type SavedCostBasis = {
+  account_id: string
+  amount: number
+  asset: string
+  executed_at: number
+  total_cost_thb: number
+  transfer_id: string
+  updated_at: number
+}
+
+export const loadSavedCostBases = async (): Promise<SavedCostBasis[]> => (
+  (await request<{ overrides: SavedCostBasis[] }>('/api/cost-basis-overrides')).overrides
+)
+
+export const removeCryptoTransferCostBasis = async (transferId: string): Promise<void> => {
+  await request<{ ok: true }>(`/api/cost-basis-overrides/${encodeURIComponent(transferId)}`, { method: 'DELETE' })
+}
+
 export const saveCryptoTransferCostBasis = async (transferId: string, totalCostThb: number): Promise<void> => {
   await request<{ costBasis: { totalCostThb: number; transferId: string; updatedAt: number } }>(`/api/cost-basis-overrides/${encodeURIComponent(transferId)}`, {
     body: JSON.stringify({ totalCostThb }),

@@ -1496,6 +1496,15 @@ input[type='number']::-webkit-outer-spin-button {
   grid-template-columns: minmax(180px, 1fr) minmax(140px, 180px) auto;
 }
 
+.pnl-saved-cost-basis form {
+  grid-template-columns: minmax(180px, 1fr) minmax(140px, 180px) auto auto;
+}
+
+.pnl-saved-confirm {
+  display: inline-flex;
+  gap: 6px;
+}
+
 .pnl-cost-suggestion {
   display: grid;
   gap: 6px;

@@ -1541,6 +1541,21 @@ const removeCryptoTransferCostBasis = async (c: Context<HonoEnv>) => {
   return c.json({ ok: true })
 }
 
+const listCryptoTransferCostBases = async (c: Context<HonoEnv>) => {
+  const accountId = c.req.query('account')
+  const statement = c.env.DB.prepare(`
+    SELECT cost_basis.transfer_id, source.account_id, source.asset, source.amount, source.executed_at, cost_basis.total_cost_thb, cost_basis.updated_at
+    FROM crypto_transfer_cost_basis AS cost_basis
+    JOIN crypto_transfers AS source ON source.id = cost_basis.transfer_id
+    JOIN accounts ON accounts.id = source.account_id
+    WHERE source.direction = 'deposit' AND accounts.exchange = 'bitkub' AND accounts.archived_at IS NULL ${accountId ? 'AND accounts.id = ?' : ''}
+    ORDER BY source.executed_at, source.id
+    LIMIT 500
+  `)
+  const result = await (accountId ? statement.bind(accountId) : statement).all<{ account_id: string; amount: number; asset: string; executed_at: number; total_cost_thb: number; transfer_id: string; updated_at: number }>()
+  return c.json({ overrides: result.results })
+}
+
 const pushTestCooldownSeconds = 60
 const manualSyncCooldownSeconds = 15 * 60
 
@@ -1702,6 +1717,7 @@ const api = factory
   .delete('/allocation-targets/:asset', removeAllocationTarget)
   .post('/accounts/:accountId/archive', archiveAccount)
   .post('/accounts/:accountId/restore', restoreAccount)
+  .get('/cost-basis-overrides', listCryptoTransferCostBases)
   .put('/cost-basis-overrides/:transferId', saveCryptoTransferCostBasis)
   .delete('/cost-basis-overrides/:transferId', removeCryptoTransferCostBasis)
   .get('/portfolio', async (c) => {
