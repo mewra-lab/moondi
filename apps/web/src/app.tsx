@@ -3063,6 +3063,7 @@ export const App = () => {
 
   return (
     <div className="app-layout">
+      <div aria-hidden="true" className="status-bar-edge" />
       <aside className="app-sidebar" aria-label={language === 'th' ? 'แถบนำทางด้านข้าง' : 'Sidebar navigation'}>
         <div className="sidebar-brand">
           <a className="brand-lockup" href={buildRouteUrl('overview')} onClick={onRouteClick('overview')} aria-label="Moondi home">
