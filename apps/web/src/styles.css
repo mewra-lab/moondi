@@ -6,17 +6,17 @@
   --surface: #ffffff;
   --surface-hover: #f6f7f9;
   --surface-recessed: #f8f9fb;
-  --topbar-bg: rgb(255 255 255 / 94%);
+  --topbar-bg: #ffffff;
   --tabbar-bg: rgb(255 255 255 / 44%);
-  --tabbar-sheen: rgb(255 255 255 / 60%);
-  --tabbar-edge-top: rgb(255 255 255 / 95%);
-  --tabbar-edge-bottom: rgb(255 255 255 / 45%);
-  --tabbar-ring: rgb(15 23 42 / 9%);
-  --tabbar-shadow: 0 14px 34px rgb(15 23 42 / 16%), 0 3px 8px rgb(15 23 42 / 8%);
-  --tabbar-lens-top: rgb(255 255 255 / 78%);
-  --tabbar-lens: rgb(255 255 255 / 38%);
-  --tabbar-lens-ring: rgb(15 23 42 / 7%);
-  --tabbar-lens-shadow: rgb(15 23 42 / 12%);
+  --tabbar-sheen: rgb(255 255 255 / 45%);
+  --tabbar-edge-top: rgb(255 255 255 / 80%);
+  --tabbar-edge-bottom: rgb(255 255 255 / 30%);
+  --tabbar-ring: rgb(15 23 42 / 5%);
+  --tabbar-shadow: 0 10px 26px rgb(15 23 42 / 11%), 0 2px 6px rgb(15 23 42 / 5%);
+  --tabbar-lens-top: rgb(255 255 255 / 70%);
+  --tabbar-lens: rgb(255 255 255 / 32%);
+  --tabbar-lens-ring: rgb(15 23 42 / 5%);
+  --tabbar-lens-shadow: rgb(15 23 42 / 8%);
 
 
   --ink: #0f172a;
@@ -64,17 +64,17 @@
   --surface: #191b20;
   --surface-hover: #1e242b;
   --surface-recessed: #131519;
-  --topbar-bg: rgba(16, 17, 20, 0.74);
-  --tabbar-bg: rgb(34 36 43 / 40%);
-  --tabbar-sheen: rgb(255 255 255 / 13%);
-  --tabbar-edge-top: rgb(255 255 255 / 36%);
-  --tabbar-edge-bottom: rgb(255 255 255 / 9%);
-  --tabbar-ring: rgb(255 255 255 / 10%);
-  --tabbar-shadow: 0 16px 36px rgb(0 0 0 / 50%), 0 3px 8px rgb(0 0 0 / 30%);
-  --tabbar-lens-top: rgb(255 255 255 / 22%);
-  --tabbar-lens: rgb(255 255 255 / 10%);
-  --tabbar-lens-ring: rgb(255 255 255 / 12%);
-  --tabbar-lens-shadow: rgb(0 0 0 / 35%);
+  --topbar-bg: #101114;
+  --tabbar-bg: rgb(118 120 128 / 28%);
+  --tabbar-sheen: rgb(255 255 255 / 6%);
+  --tabbar-edge-top: rgb(255 255 255 / 20%);
+  --tabbar-edge-bottom: rgb(255 255 255 / 5%);
+  --tabbar-ring: rgb(255 255 255 / 7%);
+  --tabbar-shadow: 0 10px 26px rgb(0 0 0 / 30%), 0 2px 6px rgb(0 0 0 / 18%);
+  --tabbar-lens-top: rgb(255 255 255 / 17%);
+  --tabbar-lens: rgb(255 255 255 / 8%);
+  --tabbar-lens-ring: rgb(255 255 255 / 9%);
+  --tabbar-lens-shadow: rgb(0 0 0 / 22%);
 
 
   --ink: #f0eee8;
@@ -462,8 +462,6 @@ input[type='number']::-webkit-outer-spin-button {
 
 .app-topbar {
   align-items: center;
-  backdrop-filter: blur(18px) saturate(135%);
-  -webkit-backdrop-filter: blur(18px) saturate(135%);
   background: var(--topbar-bg);
   border-bottom: 1px solid var(--border);
   display: flex;
