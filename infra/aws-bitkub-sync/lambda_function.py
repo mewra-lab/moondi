@@ -255,7 +255,6 @@ def map_trade(order: Any, symbol: str) -> dict[str, Any]:
     elif received is not None:
         amount = finite_number(received, "trade receive")
     else:
-        # Bitkub credits a buy truncated to 8 decimals; an unrounded quotient drifts from the wallet balance.
         amount = math.floor((order_amount - fee) / price * 1e8 + 1e-6) / 1e8
     quote_amount = order_amount - fee if derives_buy_amount else amount * price
     if not math.isfinite(amount) or amount < 0:

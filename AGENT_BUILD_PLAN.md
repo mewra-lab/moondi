@@ -46,6 +46,26 @@ exchange-history/P&L capability.
 
 ---
 
+## Read-only DCA bot activity
+
+1. Read bounded Bitkub buy records and the latest per-asset signal state from
+   the existing MongoDB collections through an authenticated read-only service.
+2. Expose the normalized feed through the private API, scoped to the bot's
+   Bitkub account. Add purchase markers, a purchase list, and heartbeat details
+   to the asset-price view.
+
+**Acceptance:** the asset view displays the bot's recorded buys and latest
+signal state for the selected account and chart range. Missing or unavailable
+bot data leaves the price chart usable. A local fixture can exercise the
+integration before connecting a real MongoDB instance.
+
+## Notification delivery follow-up
+
+Use the existing activity and health reads for an in-app notification panel.
+Send recent new AWS-synced buys, sells, and transfers through the existing
+authenticated Push Worker binding. Verify insert deduplication and the category
+preferences before enabling delivery in an installation.
+
 ## Repo Structure (suggested)
 
 ```

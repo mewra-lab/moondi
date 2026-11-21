@@ -104,9 +104,13 @@ stores normalized trades and transfers for the Activity view. It scans every
 active exchange symbol, including non-THB pairs, follows all available pages,
 and checkpoints only after the final ingestion chunk. Push notifications
 are generated from newly synchronized records, price-target crossings, and
-sync-state changes; duplicate events are suppressed by the stored sync state.
+sync-state changes. The AWS ingestion path sends a summary for recent new
+records in each chunk. Replayed trades, corrections, and historical records
+older than 24 hours do not generate AWS activity pushes.
 Notification preferences are stored per subscribed browser for trades, crypto
-transfers, THB transfers, price alerts, and sync issues. Price alerts are
+transfers, THB transfers, price alerts, and sync issues. The notification bell
+shows recent transactions, triggered price alerts, and current sync issues in
+the selected scope. Read marks are local to the browser. Price alerts are
 checked only when the normal read-only sync records a fresh THB price; they do
 not create live market-data connections. The device-display test checks local
 permission only. A separate,

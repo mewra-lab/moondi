@@ -54,6 +54,15 @@ fixed test message only to the current subscription. The API invokes the Sync
 Worker through an internal service binding; the VAPID private key remains in
 the Sync Worker and the browser never receives it.
 
+The notification panel shows recent synchronized transactions, triggered
+price alerts, and current sync issues. Read marks are stored in the current
+browser. For AWS secure sync, the API hands off recent newly inserted activity
+through the existing authenticated Sync Worker binding. Browser push messages
+summarize the event types and counts with a link to the private Activity view.
+Trade corrections and records older than 24 hours do not fire AWS activity
+pushes. The panel reads stored events and is available even without a
+browser push subscription.
+
 The overview's sync-health summary may link to a bounded sync-activity view.
 It reads normalized event metadata already retained in D1, never triggers an
 exchange request, and does not expose raw provider payloads or credentials.
@@ -441,6 +450,14 @@ Cron Worker (not user-facing, triggered by Cron Trigger):
   an explicit opt-in before including value or future P&L fields.
 
 ## 13. Current implementation boundaries
+
+- Optional DCA bot activity is read from existing MongoDB trade records and
+  the latest heartbeat through an authenticated HTTPS reader with read-only
+  collection credentials. The private API maps the feed to one Bitkub
+  account. An installation with a single Bitkub account can resolve it
+  automatically. Installations with more than one need an explicit account ID.
+  Asset detail shows purchases reported by the bot and the latest signal
+  state. Bot records populate the chart and activity panel only.
 
 - The current dashboard has balances, current valuation, a current-value asset
   allocation chart, optional allocation targets, recorded value/price history,

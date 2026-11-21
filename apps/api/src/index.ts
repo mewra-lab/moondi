@@ -3,6 +3,7 @@ import { cors } from 'hono/cors'
 import { createFactory } from 'hono/factory'
 import { calculateAverageCostHistory, calculateAverageCostPnl, calculateOpenCostBasisHistory, portfolioAssetValuesAt, type PnlResult, type PriceQuote } from '@moondi/shared'
 import { createAwsBitkubRoutes } from './aws-bitkub-routes'
+import { createDcaRoutes } from './dca-routes'
 
 type HonoEnv = {
   Bindings: Env
@@ -952,10 +953,10 @@ const isNonNegativeNumber = (value: unknown): value is number => typeof value ==
 
 const isPositiveTimestamp = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value > 0
 
-const insertAwsHistoryRecord = (db: D1Database, accountId: string, dataType: AwsHistoryDataType, record: Record<string, unknown>): D1PreparedStatement | undefined => {
+const prepareAwsHistoryRecord = (db: D1Database, accountId: string, dataType: AwsHistoryDataType, record: Record<string, unknown>): D1PreparedStatement[] => {
   const externalId = requiredHistoryId(record)
   const executedAt = record.executedAt
-  if (!externalId || !isPositiveTimestamp(executedAt)) return undefined
+  if (!externalId || !isPositiveTimestamp(executedAt)) return []
   const storedRawJson = '{}'
 
   if (dataType === 'trades') {
@@ -975,18 +976,19 @@ const insertAwsHistoryRecord = (db: D1Database, accountId: string, dataType: Aws
       || (quoteAmount !== undefined && (!isNonNegativeNumber(quoteAmount) || quoteAmount === 0))
       || !isNonNegativeNumber(amount) || !isNonNegativeNumber(fee)
       || (feeAsset !== undefined && (typeof feeAsset !== 'string' || normalizeAsset(feeAsset) !== feeAsset))
-    ) return undefined
-    return db.prepare(`
+    ) return []
+    const insert = db.prepare(`
       INSERT INTO trades (id, account_id, external_id, side, base_asset, quote_asset, price, amount, quote_amount, fee, fee_asset, executed_at, raw_json)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(account_id, external_id) DO UPDATE SET
-        amount = excluded.amount,
-        fee = excluded.fee,
-        fee_asset = excluded.fee_asset,
-        price = excluded.price,
-        quote_amount = excluded.quote_amount
-      WHERE excluded.quote_amount IS NOT NULL
+      ON CONFLICT(account_id, external_id) DO NOTHING
     `).bind(awsHistoryRecordId(accountId, externalId), accountId, externalId, side, baseAsset, quoteAsset, price, amount, quoteAmount ?? null, fee, feeAsset ?? null, executedAt, storedRawJson)
+    if (quoteAmount === undefined) return [insert]
+    const correct = db.prepare(`
+      UPDATE trades SET amount = ?, fee = ?, fee_asset = ?, price = ?, quote_amount = ?
+      WHERE account_id = ? AND external_id = ?
+        AND (amount IS NOT ? OR fee IS NOT ? OR fee_asset IS NOT ? OR price IS NOT ? OR quote_amount IS NOT ?)
+    `).bind(amount, fee, feeAsset ?? null, price, quoteAmount, accountId, externalId, amount, fee, feeAsset ?? null, price, quoteAmount)
+    return [insert, correct]
   }
 
   const direction = record.direction
@@ -997,23 +999,37 @@ const insertAwsHistoryRecord = (db: D1Database, accountId: string, dataType: Aws
     (direction !== 'deposit' && direction !== 'withdraw')
     || typeof asset !== 'string' || normalizeAsset(asset) !== asset
     || !isNonNegativeNumber(amount) || !isNonNegativeNumber(fee)
-  ) return undefined
+  ) return []
 
   if (dataType === 'crypto_transfers') {
     const txHash = record.txHash
-    if (txHash !== undefined && (typeof txHash !== 'string' || txHash.length > 512 || !/^[\x20-\x7E]+$/.test(txHash))) return undefined
-    return db.prepare(`
+    if (txHash !== undefined && (typeof txHash !== 'string' || txHash.length > 512 || !/^[\x20-\x7E]+$/.test(txHash))) return []
+    return [db.prepare(`
       INSERT INTO crypto_transfers (id, account_id, external_id, direction, asset, amount, fee, tx_hash, executed_at, raw_json)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(account_id, external_id) DO NOTHING
-    `).bind(awsHistoryRecordId(accountId, externalId), accountId, externalId, direction, asset, amount, fee, txHash ?? null, executedAt, storedRawJson)
+    `).bind(awsHistoryRecordId(accountId, externalId), accountId, externalId, direction, asset, amount, fee, txHash ?? null, executedAt, storedRawJson)]
   }
 
-  return db.prepare(`
+  return [db.prepare(`
     INSERT INTO fiat_transfers (id, account_id, external_id, direction, currency, amount, fee, executed_at, raw_json)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(account_id, external_id) DO NOTHING
-  `).bind(awsHistoryRecordId(accountId, externalId), accountId, externalId, direction, asset, amount, fee, executedAt, storedRawJson)
+  `).bind(awsHistoryRecordId(accountId, externalId), accountId, externalId, direction, asset, amount, fee, executedAt, storedRawJson)]
+}
+
+const notifyAwsHistory = async (env: Env, token: string, dataType: AwsHistoryDataType, incoming: number, outgoing: number) => {
+  try {
+    const response = await env.SYNC.fetch('https://moondi.internal/internal/push/activity', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-moond-internal-token': token },
+      body: JSON.stringify({ dataType, incoming, outgoing }),
+    })
+    await response.body?.cancel()
+    if (!response.ok) console.warn(JSON.stringify({ message: 'AWS activity push rejected', status: response.status }))
+  } catch {
+    console.warn(JSON.stringify({ message: 'AWS activity push unavailable' }))
+  }
 }
 
 const getAwsSyncState = async (c: Context<HonoEnv>) => {
@@ -1067,8 +1083,8 @@ const ingestAwsHistory = async (c: Context<HonoEnv>) => {
   if (!await getActiveBitkubAccount(c.env.DB, payload.accountId)) return c.json({ error: 'Not found' }, 404)
   if (!await claimAwsIngestionNonce(c.env.DB, authenticated.nonce, authenticated.timestamp)) return c.json({ error: 'Replay rejected' }, 409)
 
-  const inserts = payload.records.map((record) => insertAwsHistoryRecord(c.env.DB, payload.accountId, payload.dataType, record))
-  if (inserts.some((statement) => statement === undefined)) return c.json({ error: 'Invalid ingestion payload' }, 400)
+  const writes = payload.records.map((record) => prepareAwsHistoryRecord(c.env.DB, payload.accountId, payload.dataType, record))
+  if (writes.some((statements) => statements.length === 0)) return c.json({ error: 'Invalid ingestion payload' }, 400)
   const completionStatements = payload.complete ? [
     c.env.DB.prepare(`
       INSERT INTO sync_state (account_id, data_type, last_synced_at, covered_from, cursor)
@@ -1084,7 +1100,24 @@ const ingestAwsHistory = async (c: Context<HonoEnv>) => {
     c.env.DB.prepare('INSERT INTO sync_events (account_id, data_type, status, detail, occurred_at) VALUES (?, ?, ?, ?, ?)')
       .bind(payload.accountId, payload.dataType, 'success', 'AWS Bitkub ingestion', payload.syncAt),
   ] : []
-  await c.env.DB.batch([...(inserts as D1PreparedStatement[]), ...completionStatements])
+  const results = await c.env.DB.batch([...writes.flat(), ...completionStatements])
+  const pushToken = readString(c.env, 'INTERNAL_PUSH_TEST_TOKEN')
+  if (pushToken) {
+    let index = 0
+    let incoming = 0
+    let outgoing = 0
+    payload.records.forEach((record, recordIndex) => {
+      const inserted = results[index]?.meta.changes === 1
+      index += writes[recordIndex]!.length
+      const occurredAt = Number(record.executedAt)
+      if (!inserted || occurredAt < authenticated.timestamp - 24 * 60 * 60 * 1_000 || occurredAt > authenticated.timestamp) return
+      if (record.side === 'buy' || record.direction === 'deposit') incoming += 1
+      else outgoing += 1
+    })
+    if (incoming + outgoing > 0) {
+      c.executionCtx.waitUntil(notifyAwsHistory(c.env, pushToken, payload.dataType, incoming, outgoing))
+    }
+  }
   if (payload.complete) await invalidateBitkubPnl(c.env.CACHE, payload.accountId, payload.syncAt)
   return c.json({ complete: payload.complete, dataType: payload.dataType, ingested: true, recordCount: payload.records.length, syncAt: payload.syncAt })
 }
@@ -1406,8 +1439,20 @@ const pushTestKey = async (endpoint: string): Promise<string> => {
   return `push-test:${Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')}`
 }
 
+const dcaRoutes = createDcaRoutes({
+  getAccounts: async ({ DB }) => (await DB.prepare(
+    "SELECT id, archived_at FROM accounts WHERE exchange = 'bitkub'",
+  ).all<{ id: string; archived_at: number | null }>()).results,
+  getSettings: (env) => ({
+    accountId: readString(env, 'DCA_BOT_ACCOUNT_ID'),
+    token: readString(env, 'DCA_READER_TOKEN'),
+    url: readString(env, 'DCA_READER_URL'),
+  }),
+})
+
 const api = factory
   .createApp()
+  .route('/dca/activity', dcaRoutes)
   .get('/accounts', async (c) => c.json({ accounts: await getAccounts(c.env.DB) }))
   .get('/accounts/archived', async (c) => c.json({ accounts: await getArchivedAccounts(c.env.DB) }))
   .get('/access/complete', (c) => c.redirect(readString(c.env, 'ALLOWED_ORIGIN') ?? 'http://localhost:5173'))

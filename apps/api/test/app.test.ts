@@ -255,8 +255,47 @@ describe('API worker', () => {
     await expect(response.json()).resolves.toEqual({ complete: true, dataType: 'trades', ingested: true, recordCount: 1, syncAt })
     expect(batch).toHaveBeenCalledOnce()
     expect(claimRun).toHaveBeenCalledOnce()
-    expect(prepare.mock.calls.some(([query]) => String(query).includes('fee = excluded.fee'))).toBe(true)
-    expect(prepare.mock.calls.some(([query]) => String(query).includes('quote_amount = excluded.quote_amount'))).toBe(true)
+    expect(prepare.mock.calls.some(([query]) => String(query).includes('ON CONFLICT(account_id, external_id) DO NOTHING'))).toBe(true)
+    expect(prepare.mock.calls.some(([query]) => String(query).includes('UPDATE trades SET amount = ?, fee = ?, fee_asset = ?, price = ?, quote_amount = ?'))).toBe(true)
+  })
+
+  it('forwards only new recent AWS trades, skipping corrections and replayed history', async () => {
+    const result = (changes: number) => ({ meta: { changes } })
+    const batch = vi.fn().mockResolvedValue([result(1), result(0), result(0), result(1), result(1), result(1), result(0)])
+    const prepare = vi.fn((query: string) => ({
+      bind: vi.fn(() => ({
+        first: vi.fn().mockResolvedValue(query.includes('SELECT id FROM accounts') ? { id: 'bitkub-main' } : null),
+        run: vi.fn().mockResolvedValue(result(1)),
+      })),
+    }))
+    const fetch = vi.fn().mockResolvedValue(new Response(null, { status: 204 }))
+    const waitUntil = vi.fn()
+    const syncAt = Date.now()
+    const trade = { amount: 0.1, baseAsset: 'BTC', fee: 1, price: 1_000_000, quoteAsset: 'THB' }
+    const records = [
+      { ...trade, id: 'new-buy', quoteAmount: 100_000, executedAt: syncAt - 1_000, side: 'buy' },
+      { ...trade, id: 'corrected', quoteAmount: 100_000, executedAt: syncAt - 1_000, side: 'buy' },
+      { ...trade, id: 'archive', executedAt: syncAt - 2 * 86_400_000, side: 'sell' },
+      { ...trade, id: 'new-sell', quoteAmount: 100_000, executedAt: syncAt - 1_000, side: 'sell' },
+    ]
+    const request = await awsIngestionRequest(
+      JSON.stringify({ accountId: 'bitkub-main', complete: false, coveredFrom: syncAt - 3 * 86_400_000, dataType: 'trades', records, syncAt }),
+      '/internal/aws-sync/bitkub/history',
+    )
+    const response = await app.request(request, undefined, {
+      AWS_SYNC_INGESTION_SECRET: 'test-ingestion-secret',
+      INTERNAL_PUSH_TEST_TOKEN: 'test-internal-token',
+      DB: { batch, prepare } as unknown as D1Database,
+      SYNC: { fetch } as unknown as Fetcher,
+    }, { waitUntil, passThroughOnException: vi.fn(), props: {} })
+
+    expect(response.status).toBe(200)
+    expect(waitUntil).toHaveBeenCalledOnce()
+    expect(fetch).toHaveBeenCalledWith('https://moondi.internal/internal/push/activity', expect.objectContaining({
+      body: JSON.stringify({ dataType: 'trades', incoming: 1, outgoing: 1 }),
+      method: 'POST',
+    }))
+    await waitUntil.mock.calls[0]?.[0]
   })
 
   it('uses a unique P&L revision for each completed history mutation in the same sync cycle', async () => {
