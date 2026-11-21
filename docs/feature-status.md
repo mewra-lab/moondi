@@ -228,7 +228,10 @@ view; it is not labelled as portfolio-wide P&L if another asset remains
 unresolved. Ready rows show remaining cost basis, average buy price, current value, realized and
 unrealized P&L, total P&L, and **return on cost**. Return on cost divides total
 P&L by the cost represented by the selected position (including the cost of a
-position already sold); it is not a 24-hour price move or leveraged return.
+position already sold); it is not a 24-hour price move or leveraged return. That
+cost is labelled **cumulative cost including sold units** because every buy-sell
+round adds to it, so an actively traded asset shows a figure far above the money
+actually invested; it is not capital invested.
 External deposit cost-basis fields are collapsed until opened because each
 transfer needs its own historical THB cost.
 

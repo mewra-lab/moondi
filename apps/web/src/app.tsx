@@ -451,18 +451,18 @@ const PnlPanel = ({ accountId, costMethod, ignoredAssets, language, onCostMethod
   const needsReview = visibleAssets.filter((asset) => asset.status !== 'ready')
   const costBasisLabel = scope === 'holdings'
     ? visiblePnl.realizedCostBasis && visiblePnl.realizedCostBasis > 0
-      ? (language === 'th' ? 'ต้นทุนที่ใช้คิดผลตอบแทน' : 'Cost used for return')
+      ? (language === 'th' ? 'ต้นทุนสะสมรวมส่วนที่ขายแล้ว' : 'Cumulative cost incl. sold units')
       : (language === 'th' ? 'ต้นทุนของเหรียญที่ยังถือ' : 'Open holding cost')
     : scope === 'closed'
       ? (language === 'th' ? 'ต้นทุนของสถานะที่ปิดแล้ว' : 'Closed position cost')
-      : (language === 'th' ? 'ต้นทุนที่ใช้คิดผลตอบแทน' : 'Cost used for return')
+      : (language === 'th' ? 'ต้นทุนสะสมรวมส่วนที่ขายแล้ว' : 'Cumulative cost incl. sold units')
   const costBasisDescription = visiblePnl.openCostBasis === null || visiblePnl.realizedCostBasis === null
     ? `${visibleAssets.length} ${language === 'th' ? 'เหรียญในมุมมอง' : 'assets in view'}`
     : scope === 'holdings'
-      ? (language === 'th' ? `ต้นทุนของจำนวนที่ยังถือ ${money.format(visiblePnl.openCostBasis)}${visiblePnl.realizedCostBasis > 0 ? ` · ต้นทุนที่ขายแล้ว ${money.format(visiblePnl.realizedCostBasis)}` : ''}` : `Cost of current quantity ${money.format(visiblePnl.openCostBasis)}${visiblePnl.realizedCostBasis > 0 ? ` · Sold cost ${money.format(visiblePnl.realizedCostBasis)}` : ''}`)
+      ? (language === 'th' ? `ต้นทุนของจำนวนที่ยังถือ ${money.format(visiblePnl.openCostBasis)}${visiblePnl.realizedCostBasis > 0 ? ` · ต้นทุนที่ขายแล้ว ${money.format(visiblePnl.realizedCostBasis)} · นับทุกรอบที่ซื้อขาย ไม่ใช่เงินที่ลงทุนจริง` : ''}` : `Cost of current quantity ${money.format(visiblePnl.openCostBasis)}${visiblePnl.realizedCostBasis > 0 ? ` · Sold cost ${money.format(visiblePnl.realizedCostBasis)} · counts every buy-sell round, not money actually invested` : ''}`)
       : scope === 'closed'
         ? (language === 'th' ? `ต้นทุนของจำนวนที่ขายแล้ว ${money.format(visiblePnl.realizedCostBasis)}` : `Cost of units sold ${money.format(visiblePnl.realizedCostBasis)}`)
-        : (language === 'th' ? `ยังถือ ${money.format(visiblePnl.openCostBasis)} · ปิดแล้ว ${money.format(visiblePnl.realizedCostBasis)}` : `Open ${money.format(visiblePnl.openCostBasis)} · Closed ${money.format(visiblePnl.realizedCostBasis)}`)
+        : (language === 'th' ? `ยังถือ ${money.format(visiblePnl.openCostBasis)} · ปิดแล้ว ${money.format(visiblePnl.realizedCostBasis)} · นับทุกรอบที่ซื้อขาย ไม่ใช่เงินที่ลงทุนจริง` : `Open ${money.format(visiblePnl.openCostBasis)} · Closed ${money.format(visiblePnl.realizedCostBasis)} · counts every buy-sell round, not money actually invested`)
 
   useEffect(() => {
     localStorage.setItem(pnlViewStorageKey, JSON.stringify({ scope, selectedAssets }))
@@ -1114,7 +1114,7 @@ const createPortfolioCardImage = ({ costMethod, createdAt, holdings, language, p
     const metrics: Array<[string, string]> = pnlIsSelection
       ? [
           [isThai ? 'ขอบเขต' : 'Scope', pnlAsset.asset],
-          [isThai ? 'ต้นทุนที่ใช้คิดผลตอบแทน' : 'Cost used for return', pnlAsset.costBasis === null ? '—' : (showPnlCostBasis ? currency(language).format(pnlAsset.costBasis) : hiddenValue)],
+          [isThai ? 'ต้นทุนสะสมรวมส่วนที่ขายแล้ว' : 'Cumulative cost incl. sold units', pnlAsset.costBasis === null ? '—' : (showPnlCostBasis ? currency(language).format(pnlAsset.costBasis) : hiddenValue)],
           [isThai ? 'มูลค่าปัจจุบัน' : 'Current value', pnlAsset.currentValue === null ? '—' : (showPnlCurrentValue ? currency(language).format(pnlAsset.currentValue) : hiddenValue)],
         ]
       : isClosedPosition
