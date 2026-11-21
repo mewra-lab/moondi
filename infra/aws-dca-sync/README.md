@@ -52,7 +52,8 @@ order. In short:
    token and ingestion secret the Bitkub sync already uses.
 4. Package with `requirements.txt` for the Lambda runtime and architecture, create
    the function (handler `lambda_function.lambda_handler`, 60 s, 256 MB, reserved
-   concurrency 1), run it once manually, then schedule it.
+   concurrency 1 where your quota allows), run it once manually, then schedule
+   it with bounded retries.
 
 Environment variables (non-secret): `MONGODB_URI_PARAMETER`,
 `CF_ACCESS_CLIENT_ID_PARAMETER`, `CF_ACCESS_CLIENT_SECRET_PARAMETER`,

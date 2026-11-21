@@ -261,8 +261,13 @@ public Lambda Function URL exists in this design.
 5. Package `infra/aws-dca-sync/lambda_function.py` with the dependency from its
    `requirements.txt` built for your runtime and architecture, and create a
    separate function with handler `lambda_function.lambda_handler`, a 60-second
-   timeout, 256 MB memory, **no VPC and no function URL**, and reserved
-   concurrency `1`. Set these non-secret environment variables:
+   timeout, 256 MB memory, and **no VPC and no function URL**. Set reserved
+   concurrency to `1` if your account's concurrency quota allows it (AWS
+   requires at least 10 unreserved executions, so a new account may refuse);
+   the five-minute schedule and 60-second timeout keep runs from overlapping
+   either way. Download the dependency wheels in a fresh directory and compare
+   their SHA-256 with the digests PyPI publishes before packaging. Set these
+   non-secret environment variables:
 
    | Name | Value |
    | --- | --- |
@@ -276,7 +281,9 @@ public Lambda Function URL exists in this design.
 6. Run one manual test with `{}`. It should return `{ "ok": true, … }` and log only
    counts. A `401`, `403`, or `404` means the Access policy or ingestion secret is
    wrong; do not weaken Access to diagnose it. Then create an EventBridge
-   Scheduler schedule (`rate(5 minutes)`, no flexible window, bounded retries).
+   Scheduler schedule (`rate(5 minutes)`, no flexible window, at most two
+   retries and a ten-minute maximum event age) whose execution role may only
+   `lambda:InvokeFunction` on this function.
 7. Remove any older DCA reader function, its Function URL and resource policy, and
    delete the API Worker's obsolete `DCA_READER_URL`, `DCA_READER_TOKEN`, and
    `DCA_BOT_ACCOUNT_ID` secrets if they exist.
