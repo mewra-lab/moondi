@@ -1,9 +1,10 @@
-import { createContext, lazy, Suspense, useCallback, useContext, useDeferredValue, useEffect, useId, useMemo, useRef, useState, type ComponentProps, type MouseEvent, type TouchEvent } from 'react'
+import { createContext, lazy, Suspense, useCallback, useContext, useDeferredValue, useEffect, useId, useMemo, useRef, useState, type ComponentProps, type MouseEvent, type ReactNode, type TouchEvent } from 'react'
 import { useRegisterSW } from 'virtual:pwa-register/react'
 import { AlertDialog } from '@base-ui/react/alert-dialog'
 import { Button } from '@base-ui/react/button'
 import { Input } from '@base-ui/react/input'
 import { Switch } from '@base-ui/react/switch'
+import { checkForServiceWorkerUpdate, clearLocalSettings } from './app-update'
 import { AppSelect } from './app-select'
 import { AssetIcon } from './asset-icon'
 import { addPriceAlert, addWatchlistAsset, apiAccessRequired, apiAccessUrl, archiveAccount, loadAccounts, loadArchivedAccounts, loadAssetPriceHistories, loadAssetPriceHistory, loadAssetTradeSummary, loadAssetTrades, loadBackup, loadDashboard, loadDcaActivity, loadPushPublicKey, loadSavedCostBases, loadSyncEvents, loadTransactions, loadValueHistory, removeAllocationTarget, removeCryptoTransferCostBasis, removePriceAlert, removePushSubscription, removeWatchlistAsset, restoreAccount, saveAllocationTarget, saveCryptoTransferCostBasis, savePushSubscription, testPushDelivery } from './api'
@@ -452,20 +453,14 @@ const PnlPanel = ({ accountId, costMethod, costMethodMessage, ignoredAssets, lan
   const missingCostBasis = useMemo(() => pnl.missingCostBasis.filter((transfer) => visibleAssetNames.has(transfer.asset)), [pnl.missingCostBasis, visibleAssetNames])
   const needsReview = visibleAssets.filter((asset) => asset.status !== 'ready')
   const savedRefreshKey = useMemo(() => `${pnl.missingCostBasis.map((item) => item.transferId).join('|')}#${pnl.assets.map((asset) => `${asset.asset}:${asset.status}`).join('|')}`, [pnl])
-  const costBasisLabel = scope === 'holdings'
-    ? visiblePnl.realizedCostBasis && visiblePnl.realizedCostBasis > 0
-      ? (language === 'th' ? 'ต้นทุนสะสมรวมส่วนที่ขายแล้ว' : 'Cumulative cost incl. sold units')
-      : (language === 'th' ? 'ต้นทุนของเหรียญที่ยังถือ' : 'Open holding cost')
-    : scope === 'closed'
-      ? (language === 'th' ? 'ต้นทุนของสถานะที่ปิดแล้ว' : 'Closed position cost')
-      : (language === 'th' ? 'ต้นทุนสะสมรวมส่วนที่ขายแล้ว' : 'Cumulative cost incl. sold units')
-  const costBasisDescription = visiblePnl.openCostBasis === null || visiblePnl.realizedCostBasis === null
-    ? `${visibleAssets.length} ${language === 'th' ? 'เหรียญในมุมมอง' : 'assets in view'}`
-    : scope === 'holdings'
-      ? (language === 'th' ? `ต้นทุนของจำนวนที่ยังถือ ${money.format(visiblePnl.openCostBasis)}${visiblePnl.realizedCostBasis > 0 ? ` · ต้นทุนที่ขายแล้ว ${money.format(visiblePnl.realizedCostBasis)} · นับทุกรอบที่ซื้อขาย ไม่ใช่เงินที่ลงทุนจริง` : ''}` : `Cost of current quantity ${money.format(visiblePnl.openCostBasis)}${visiblePnl.realizedCostBasis > 0 ? ` · Sold cost ${money.format(visiblePnl.realizedCostBasis)} · counts every buy-sell round, not money actually invested` : ''}`)
-      : scope === 'closed'
-        ? (language === 'th' ? `ต้นทุนของจำนวนที่ขายแล้ว ${money.format(visiblePnl.realizedCostBasis)}` : `Cost of units sold ${money.format(visiblePnl.realizedCostBasis)}`)
-        : (language === 'th' ? `ยังถือ ${money.format(visiblePnl.openCostBasis)} · ปิดแล้ว ${money.format(visiblePnl.realizedCostBasis)} · นับทุกรอบที่ซื้อขาย ไม่ใช่เงินที่ลงทุนจริง` : `Open ${money.format(visiblePnl.openCostBasis)} · Closed ${money.format(visiblePnl.realizedCostBasis)} · counts every buy-sell round, not money actually invested`)
+  const closedView = scope === 'closed'
+  const costBasisLabel = closedView
+    ? (language === 'th' ? 'ต้นทุนของสถานะที่ปิดแล้ว' : 'Closed position cost')
+    : (language === 'th' ? 'ต้นทุนที่ยังถือ' : 'Open cost')
+  const costBasisValue = closedView ? visiblePnl.costBasis : visiblePnl.openCostBasis
+  const cumulativeCostNote = !closedView && visiblePnl.costBasis !== null && visiblePnl.realizedCostBasis !== null && visiblePnl.realizedCostBasis > 0
+    ? (language === 'th' ? `เทียบต้นทุนสะสม ${money.format(visiblePnl.costBasis)}` : `on cumulative cost ${money.format(visiblePnl.costBasis)}`)
+    : null
 
   useEffect(() => {
     localStorage.setItem(pnlViewStorageKey, JSON.stringify({ scope, selectedAssets }))
@@ -547,10 +542,10 @@ const PnlPanel = ({ accountId, costMethod, costMethodMessage, ignoredAssets, lan
         <button className="text-button" onClick={() => setSelectedAssets([])} type="button">{language === 'th' ? 'ล้างตัวเลือก' : 'Clear selection'}</button>
       </div> : null}
       <div className="pnl-summary">
-        <div><span>{costBasisLabel}</span><strong className={valuesVisible ? undefined : 'value-concealed'}>{visiblePnl.costBasis === null ? '—' : money.format(visiblePnl.costBasis)}</strong><small className={valuesVisible ? undefined : 'value-concealed'}>{costBasisDescription}</small></div>
+        <div><span>{costBasisLabel}</span><strong className={valuesVisible ? undefined : 'value-concealed'}>{costBasisValue === null ? '—' : money.format(costBasisValue)}</strong></div>
         <div><span>{language === 'th' ? 'กำไรที่เกิดขึ้นแล้ว' : 'Realized P&L'}</span><strong className={`${pnlTone(visiblePnl.realizedPnl)}${valuesVisible ? '' : ' value-concealed'}`}>{visiblePnl.realizedPnl === null ? '—' : signedMoney(visiblePnl.realizedPnl)}</strong></div>
         <div><span>{language === 'th' ? 'กำไรที่ยังไม่เกิดขึ้น' : 'Unrealized P&L'}</span><strong className={`${pnlTone(visiblePnl.unrealizedPnl)}${valuesVisible ? '' : ' value-concealed'}`}>{visiblePnl.unrealizedPnl === null ? '—' : signedMoney(visiblePnl.unrealizedPnl)}</strong></div>
-        <div><span>{language === 'th' ? 'กำไร / ขาดทุนของมุมมองนี้' : 'P&L for this view'}</span><strong className={`${pnlTone(visiblePnl.totalPnl)}${valuesVisible ? '' : ' value-concealed'}`}>{visiblePnl.totalPnl === null ? '—' : signedMoney(visiblePnl.totalPnl)}</strong><small className={`${pnlTone(visiblePnl.pnlPercent)}${valuesVisible ? '' : ' value-concealed'}`}>{visiblePnl.pnlPercent === null ? (language === 'th' ? 'ไม่มีฐานต้นทุนสำหรับ %' : 'No cost denominator') : signedPercent(visiblePnl.pnlPercent)}</small></div>
+        <div><span>{language === 'th' ? 'กำไร / ขาดทุนของมุมมองนี้' : 'P&L for this view'}</span><strong className={`${pnlTone(visiblePnl.totalPnl)}${valuesVisible ? '' : ' value-concealed'}`}>{visiblePnl.totalPnl === null ? '—' : signedMoney(visiblePnl.totalPnl)}</strong><small className={`${pnlTone(visiblePnl.pnlPercent)}${valuesVisible ? '' : ' value-concealed'}`}>{visiblePnl.pnlPercent === null ? (language === 'th' ? 'ไม่มีฐานต้นทุนสำหรับ %' : 'No cost denominator') : signedPercent(visiblePnl.pnlPercent)}</small>{cumulativeCostNote ? <small className={valuesVisible ? undefined : 'value-concealed'}>{cumulativeCostNote}</small> : null}</div>
       </div>
       {ignoredAssets.length > 0 ? <p className="pnl-filter-context">{language === 'th' ? `ไม่รวมในการแสดงและสรุป P&L ของเบราว์เซอร์นี้: ${ignoredAssets.join(', ')} · ข้อมูลและยอดคงเหลือจริงยังอยู่ครบ` : `Excluded from this browser’s P&L view and summary: ${ignoredAssets.join(', ')} · Source data and holdings remain unchanged.`}</p> : null}
       {!visiblePnl.complete ? <div className="pnl-warning">
@@ -1677,8 +1672,19 @@ const AssetDetail = ({ accountId, asset, holdings, language, onClose, pnlAsset, 
   )
 }
 
-const UpdateNotice = ({ language }: { language: Language }) => {
+type UpdateCheckState = 'idle' | 'checking' | 'current' | 'found' | 'failed'
+
+type AppUpdate = {
+  apply: () => void
+  check: () => Promise<void>
+  checkState: UpdateCheckState
+  ready: boolean
+  reset: () => void
+}
+
+const useAppUpdate = (): AppUpdate => {
   const [registration, setRegistration] = useState<ServiceWorkerRegistration>()
+  const [checkState, setCheckState] = useState<UpdateCheckState>('idle')
   const {
     needRefresh: [needRefresh],
     updateServiceWorker,
@@ -1708,14 +1714,64 @@ const UpdateNotice = ({ language }: { language: Language }) => {
     }
   }, [registration])
 
-  if (!needRefresh) return null
+  const check = useCallback(async () => {
+    if (!registration) {
+      setCheckState('failed')
+      return
+    }
+    setCheckState('checking')
+    try {
+      const outcome = await checkForServiceWorkerUpdate(registration)
+      setCheckState(outcome === 'installed' ? 'found' : outcome === 'none' ? 'current' : 'failed')
+    } catch {
+      setCheckState('failed')
+    }
+  }, [registration])
+
+  const apply = useCallback(() => {
+    void updateServiceWorker(true)
+  }, [updateServiceWorker])
+
+  const reset = useCallback(() => {
+    setCheckState((current) => current === 'checking' ? current : 'idle')
+  }, [])
+
+  const ready = needRefresh || checkState === 'found'
+
+  return useMemo(() => ({ apply, check, checkState, ready, reset }), [apply, check, checkState, ready, reset])
+}
+
+const AppUpdateContext = createContext<AppUpdate | null>(null)
+
+const AppUpdateProvider = ({ children }: { children: ReactNode }) => {
+  const update = useAppUpdate()
+  return <AppUpdateContext.Provider value={update}>{children}</AppUpdateContext.Provider>
+}
+
+const useAppUpdateState = (): AppUpdate => {
+  const update = useContext(AppUpdateContext)
+  if (!update) throw new Error('AppUpdateProvider is missing')
+  return update
+}
+
+const UpdateNotice = ({ language }: { language: Language }) => {
+  const update = useAppUpdateState()
+  if (!update.ready) return null
 
   return (
     <div className="update-notice" role="status">
       <span>{language === 'th' ? 'มีเวอร์ชันใหม่พร้อมใช้งาน' : 'A new version is ready.'}</span>
-      <button onClick={() => void updateServiceWorker(true)}>{language === 'th' ? 'อัปเดต' : 'Update'}</button>
+      <button onClick={update.apply}>{language === 'th' ? 'อัปเดต' : 'Update'}</button>
     </div>
   )
+}
+
+const resetLocalSettings = (): void => {
+  try {
+    clearLocalSettings(localStorage, [notificationPreferencesStorageKey])
+  } finally {
+    window.location.reload()
+  }
 }
 
 const EmptyState = ({ language }: { language: Language }) => (
@@ -2545,6 +2601,9 @@ const SettingsDialog = ({ accounts, archivedAccounts, ignoredPnlAssets, language
   theme: Theme
   valuesVisible: boolean
 }) => {
+  const update = useAppUpdateState()
+  const cancelResetRef = useRef<HTMLButtonElement>(null)
+  const [confirmingReset, setConfirmingReset] = useState(false)
   const cancelArchiveRef = useRef<HTMLButtonElement>(null)
   const [accountMessage, setAccountMessage] = useState<string | null>(null)
   const [archivingAccountId, setArchivingAccountId] = useState<string | null>(null)
@@ -2563,6 +2622,26 @@ const SettingsDialog = ({ accounts, archivedAccounts, ignoredPnlAssets, language
       setPendingArchive(null)
     }
   }
+
+  useEffect(() => {
+    if (confirmingReset) cancelResetRef.current?.focus()
+  }, [confirmingReset])
+
+  const resetUpdateCheck = update.reset
+  useEffect(() => {
+    if (!open) setConfirmingReset(false)
+    else resetUpdateCheck()
+  }, [open, resetUpdateCheck])
+
+  const updateStatus = update.ready
+    ? (language === 'th' ? 'มีเวอร์ชันใหม่พร้อมใช้งาน' : 'A new version is ready.')
+    : update.checkState === 'checking'
+      ? (language === 'th' ? 'กำลังตรวจสอบ…' : 'Checking…')
+      : update.checkState === 'current'
+        ? (language === 'th' ? 'ใช้เวอร์ชันล่าสุดอยู่แล้ว' : 'You are on the latest version.')
+        : update.checkState === 'failed'
+          ? (language === 'th' ? 'ตรวจสอบไม่สำเร็จ ลองอีกครั้ง' : 'Could not check. Try again.')
+          : (language === 'th' ? 'ตรวจหาเวอร์ชันใหม่ของแอป' : 'Look for a new app version')
 
   const restore = async (account: Account) => {
     setArchivingAccountId(account.id)
@@ -2687,6 +2766,31 @@ const SettingsDialog = ({ accounts, archivedAccounts, ignoredPnlAssets, language
           </section>
 
           <NotificationSettings language={language} />
+
+          <section className="settings-card settings-session settings-action-card">
+            <div>
+              <p>{language === 'th' ? 'อัปเดตแอป' : 'App update'}</p>
+              <span role="status">{updateStatus}</span>
+            </div>
+            {update.ready
+              ? <button className="settings-action-button" onClick={update.apply} type="button">{language === 'th' ? 'อัปเดตตอนนี้' : 'Update now'}</button>
+              : <button className="settings-action-button" disabled={update.checkState === 'checking'} onClick={() => void update.check()} type="button">{language === 'th' ? 'ตรวจสอบอัปเดต' : 'Check for updates'}</button>}
+          </section>
+
+          <section className="settings-card settings-session settings-action-card">
+            <div>
+              <p>{language === 'th' ? 'รีเซ็ตการตั้งค่า' : 'Reset settings'}</p>
+              <span>{confirmingReset
+                ? (language === 'th' ? 'ล้างค่าที่จำไว้ในเครื่องนี้ (ไม่รวมแจ้งเตือน)' : 'Clears saved settings here, except notifications.')
+                : (language === 'th' ? 'กลับเป็นค่าเริ่มต้นบนเครื่องนี้' : 'Restore defaults on this device')}</span>
+            </div>
+            {confirmingReset
+              ? <div className="settings-action-group">
+                <button className="settings-action-button" onClick={() => setConfirmingReset(false)} ref={cancelResetRef} type="button">{language === 'th' ? 'ยกเลิก' : 'Cancel'}</button>
+                <button className="settings-action-button danger" onClick={resetLocalSettings} type="button">{language === 'th' ? 'ยืนยันรีเซ็ต' : 'Confirm reset'}</button>
+              </div>
+              : <button className="settings-action-button" onClick={() => setConfirmingReset(true)} type="button">{language === 'th' ? 'รีเซ็ต' : 'Reset'}</button>}
+          </section>
 
           <section className="settings-card settings-session">
             <div>
@@ -3367,6 +3471,7 @@ export const App = () => {
   }
 
   return (
+    <AppUpdateProvider>
     <CostMethodContext.Provider value={costMethod}>
     <div className="app-layout">
       <div aria-hidden="true" className="status-bar-edge" />
@@ -3582,5 +3687,6 @@ export const App = () => {
       <SettingsDialog accounts={accounts} archivedAccounts={archivedAccounts} ignoredPnlAssets={ignoredPnlAssets} language={language} onArchiveAccount={disconnectAccount} onClose={() => setIsSettingsOpen(false)} onRestoreAccount={reconnectAccount} open={isSettingsOpen} overviewSections={overviewSections} pnlAssets={changingAccountScope ? [] : portfolio?.pnl.assets ?? []} setIgnoredPnlAssets={setIgnoredPnlAssets} setLanguage={setLanguage} setOverviewSection={(section, visible) => setOverviewSections((current) => ({ ...current, [section]: visible }))} setTheme={setTheme} setValuesVisible={setValuesVisible} theme={theme} valuesVisible={valuesVisible} />
     </div>
     </CostMethodContext.Provider>
+    </AppUpdateProvider>
   )
 }
